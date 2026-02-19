@@ -84,14 +84,37 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path "src/assets/engines/default"
-          $url = "https://github.com/official-stockfish/Stockfish/releases/download/sf_18/stockfish-windows-x86-64-modern.zip"
-          Write-Host "Downloading bundled engine from $url ..."
-          Invoke-WebRequest -Uri $url -OutFile "sf.zip"
+          $TAG = "sf_18"
+          $variants = @(
+            "stockfish-windows-x86-64-avx2.zip",
+            "stockfish-windows-x86-64-bmi2.zip",
+            "stockfish-windows-x86-64-sse41-popcnt.zip",
+            "stockfish-windows-x86-64-modern.zip"
+          )
+
+          $success = $false
+          foreach ($v in $variants) {
+            $url = "https://github.com/official-stockfish/Stockfish/releases/download/$TAG/$v"
+            Write-Host "Trying to download bundled engine: $url ..."
+            try {
+              Invoke-WebRequest -Uri $url -OutFile "sf.zip" -ErrorAction Stop
+              $success = $true
+              Write-Host "Successfully downloaded $v"
+              break
+            } catch {
+              Write-Host "Failed to download $v (404 or network error)."
+            }
+          }
+
+          if (-not $success) {
+            Write-Error "Could not download any Stockfish variant for Windows!"
+            exit 1
+          }
+
           Expand-Archive -Path "sf.zip" -DestinationPath "temp_sf"
           $bin = Get-ChildItem -Path "temp_sf" -Filter "stockfish*.exe" -Recurse | Select-Object -First 1
           Move-Item -Path $bin.FullName -Destination "src/assets/engines/default/stockfish.exe"
-          # Create a basic version.json
-          '{"version":"18","build":"modern","arch":"x86-64","binary_path":"src/assets/engines/default/stockfish.exe"}' | Out-File -FilePath "src/assets/engines/default/version.json" -Encoding utf8
+          '{"version":"18","build":"bundled","arch":"x86-64","binary_path":"src/assets/engines/default/stockfish.exe"}' | Out-File -FilePath "src/assets/engines/default/version.json" -Encoding utf8
 
       - name: Build with PyInstaller (Windows)
         if: runner.os == 'Windows'
@@ -101,18 +124,34 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           mkdir -p src/assets/engines/default
+          TAG="sf_18"
           if [ "${{ runner.os }}" = "macOS" ]; then
-            URL="https://github.com/official-stockfish/Stockfish/releases/download/sf_18/stockfish-macos-arm64-apple-silicon.tar"
+            VARIANTS=("stockfish-macos-arm64-apple-silicon.tar" "stockfish-macos-x86-64-avx2.tar" "stockfish-macos-x86-64.tar")
           else
-            URL="https://github.com/official-stockfish/Stockfish/releases/download/sf_18/stockfish-ubuntu-x86-64-modern.tar"
+            VARIANTS=("stockfish-ubuntu-x86-64-avx2.tar" "stockfish-ubuntu-x86-64-sse41-popcnt.tar" "stockfish-linux-x86-64-avx2.tar")
           fi
-          echo "Downloading bundled engine for ${{ runner.os }} from $URL ..."
-          curl -L -o sf.tar "$URL"
+
+          SUCCESS=0
+          for v in "${VARIANTS[@]}"; do
+            URL="https://github.com/official-stockfish/Stockfish/releases/download/$TAG/$v"
+            echo "Trying to download bundled engine: $URL ..."
+            if curl -L -f -o sf.tar "$URL"; then
+              echo "Successfully downloaded $v"
+              SUCCESS=1
+              break
+            fi
+          done
+
+          if [ $SUCCESS -eq 0 ]; then
+            echo "Error: Could not download any Stockfish variant for ${{ runner.os }}!"
+            exit 1
+          fi
+
           tar -xf sf.tar
           BIN=$(find . -maxdepth 4 -name "stockfish*" -type f ! -name "*.tar" ! -name "*.zip" | head -n 1)
           cp "$BIN" src/assets/engines/default/stockfish
           chmod +x src/assets/engines/default/stockfish
-          echo '{"version":"18","build":"modern","arch":"native","binary_path":"src/assets/engines/default/stockfish"}' > src/assets/engines/default/version.json
+          echo '{"version":"18","build":"bundled","arch":"native","binary_path":"src/assets/engines/default/stockfish"}' > src/assets/engines/default/version.json
 
       - name: Build with PyInstaller (macOS / Linux)
         if: runner.os != 'Windows'
