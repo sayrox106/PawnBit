@@ -19,6 +19,9 @@ import threading
 import time
 import platform
 import multiprocess
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+from pathlib import Path
 
 # ── DPI AWARENESS (Windows) ───────────────────────────────
 if sys.platform == "win32":
@@ -57,18 +60,6 @@ from overlay import run as run_overlay
 from stockfish_bot import StockfishBot
 import engine_manager
 
-# ── HIDE CONSOLE WINDOW ───────────────────────────────────
-if sys.platform == "win32":
-    import subprocess
-    _original_popen = subprocess.Popen
-    def _silent_popen(*args, **kwargs):
-        kwargs['creationflags'] = kwargs.get('creationflags', 0) | 0x08000000
-        return _original_popen(*args, **kwargs)
-    subprocess.Popen = _silent_popen
-
-if getattr(sys, 'frozen', False):
-    multiprocess.set_executable(sys.executable)
-
 try:
     from selenium import webdriver
     from selenium.webdriver.chrome.service import Service as ChromeService
@@ -94,8 +85,24 @@ def log_error(msg):
 
 # Redirect stdout/stderr to file if frozen
 if getattr(sys, 'frozen', False):
-    sys.stdout = open(Path(_BASE_DIR) / "output_log.txt", "a", encoding="utf-8")
-    sys.stderr = open(Path(_BASE_DIR) / "error_log.txt", "a", encoding="utf-8")
+    try:
+        sys.stdout = open(_BASE_DIR / "output_log.txt", "a", encoding="utf-8")
+        sys.stderr = open(_BASE_DIR / "error_log.txt", "a", encoding="utf-8")
+    except Exception:
+        pass
+
+
+def kill_process_tree(pid):
+    """Forcefully kill a process and all its children (Windows)."""
+    if sys.platform == "win32" and pid:
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                capture_output=True,
+                creationflags=0x08000000
+            )
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -922,6 +929,8 @@ class GUI:
         """Called when the user clicks the X button."""
         self.exit = True
         self._cleanup_resources()
+        # Give a moment for chrome.quit() and process kills to complete
+        time.sleep(0.5)
         try:
             self.master.destroy()
         except Exception:
@@ -1217,15 +1226,17 @@ class GUI:
                     self.overlay_screen_process.terminate()
                     self.overlay_screen_process.join(timeout=0.5)
                     if self.overlay_screen_process.is_alive():
-                        self.overlay_screen_process.kill()
+                        kill_process_tree(self.overlay_screen_process.pid)
                 except Exception:
                     pass
                 self.overlay_screen_process = None
 
             if self.stockfish_bot_process.is_alive():
-                self.stockfish_bot_process.join(timeout=1.0)
+                self.stockfish_bot_process.join(timeout=1.5)
                 if self.stockfish_bot_process.is_alive():
-                    self.stockfish_bot_process.kill()
+                    # If it's still alive, it means the graceful stop failed
+                    # or it's hung. Kill it and its child (Stockfish engine).
+                    kill_process_tree(self.stockfish_bot_process.pid)
             self.stockfish_bot_process = None
 
         if self.stockfish_bot_pipe is not None:

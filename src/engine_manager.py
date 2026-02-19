@@ -104,6 +104,60 @@ def _write_version_json(version_dir: Path, meta: Dict[str, Any]) -> None:
         json.dump(meta, f, indent=2)
 
 
+def _find_version_json_for(binary_path: str) -> Optional[Dict]:
+    """Look for version.json in same dir or parent dir of binary."""
+    p = Path(binary_path)
+    # Check current dir
+    vj = p.parent / "version.json"
+    if vj.exists():
+        try:
+            with open(vj, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    # Check parent dir
+    vj = p.parent.parent / "version.json"
+    if vj.exists():
+        try:
+             with open(vj, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return None
+
+
+def _build_status(binary_path: str, vj: Optional[Dict]) -> Dict:
+    ver = "?"
+    if vj:
+        ver = vj.get("version", "?")
+    elif "sf_18" in binary_path.lower() or "sf18" in binary_path.lower() or "stockfish_18" in binary_path.lower() or "sf-18" in binary_path.lower():
+        ver = "18"
+    
+    return {
+        "valid": True,
+        "binary_path": binary_path,
+        "version": ver,
+        "arch": vj.get("arch", "?") if vj else "?",
+        "build": vj.get("build", "?") if vj else "?",
+    }
+
+
+def _find_binary_in_dir(directory: Path) -> Optional[Path]:
+    """Search for stockfish executable in directory."""
+    # Basic list of common patterns
+    patterns = ["stockfish*", "sf*", "*.exe"]
+    for pattern in patterns:
+        for p in directory.rglob(pattern):
+            if p.is_file() and not p.name.endswith((".zip", ".tar", ".gz", ".json", ".txt", ".md", ".py")):
+                 if platform.system() == "Windows":
+                     if p.suffix.lower() == ".exe":
+                         return p
+                 else:
+                     if os.access(p, os.X_OK):
+                         return p
+    return None
+
+
 # ---------------------------------------------------------------------------
 # System / CPU feature detection
 # ---------------------------------------------------------------------------
@@ -279,13 +333,16 @@ def validate_engine(path: str, timeout: float = _SPAWN_TIMEOUT) -> bool:
         while time.monotonic() < deadline:
             try:
                 line = proc.stdout.readline()
+                if not line: break
+                if "uciok" in line:
+                    proc.kill()
+                    proc.wait()
+                    return True
             except Exception:
                 break
-            if "uciok" in line:
-                proc.kill()
-                return True
 
         proc.kill()
+        proc.wait()
         return False
     except (OSError, PermissionError, FileNotFoundError):
         return False

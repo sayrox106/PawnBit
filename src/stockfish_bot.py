@@ -429,8 +429,15 @@ class StockfishBot(multiprocess.Process):
         finally:
             # ── CLEANUP ───────────────────────────────────────────────
             try:
-                # Explicitly delete stockfish to close the process
-                if 'stockfish' in locals():
+                # Explicitly close stockfish to ensure the subprocess is killed
+                if 'stockfish' in locals() and stockfish:
+                    try:
+                        # Internal access to the subprocess object in stockfish-python
+                        if hasattr(stockfish, "_stockfish_subprocess"):
+                            stockfish._stockfish_subprocess.kill()
+                            stockfish._stockfish_subprocess.wait()
+                    except Exception:
+                        pass
                     del stockfish
             except Exception:
                 pass
