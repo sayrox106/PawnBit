@@ -51,6 +51,13 @@ else:
 _ENGINES_DIR = _BASE_DIR / "engines" / "stockfish"
 _CONFIG_PATH = _BASE_DIR / "config.json"
 
+# Asset directory (contains bundled engine if any)
+if getattr(sys, 'frozen', False):
+    _ASSET_DIR = Path(sys._MEIPASS) / "assets"
+else:
+    _ASSET_DIR = Path(__file__).resolve().parent / "assets"
+_BUNDLED_ENGINES_DIR = _ASSET_DIR / "engines"
+
 _GITHUB_API_URL = "https://api.github.com/repos/official-stockfish/Stockfish/releases/latest"
 _DOWNLOAD_TIMEOUT   = 60    # seconds per urllib call
 _SPAWN_TIMEOUT      = 5.0  # seconds for the binary spawn test (Stockfish 18 can be slow on first run)
@@ -302,7 +309,7 @@ def find_existing_engine() -> Optional[Dict[str, Any]]:
             vj = _find_version_json_for(abs_path)
             return _build_status(abs_path, vj)
 
-    # 2. Scan engines/stockfish/ for versioned directories
+    # 2. Scan engines/stockfish/ for versioned directories (User-installed)
     if _ENGINES_DIR.exists():
         for entry in sorted(_ENGINES_DIR.iterdir(), reverse=True):
             if not entry.is_dir():
@@ -318,6 +325,28 @@ def find_existing_engine() -> Optional[Dict[str, Any]]:
                         return _build_status(abs_bp, vj)
                 except Exception:
                     continue
+
+    # 3. Check for BUNDLED engines in assets (Fallback for fresh installs)
+    if _BUNDLED_ENGINES_DIR.exists():
+        # Look for folders like 'default' or versioned ones
+        for entry in sorted(_BUNDLED_ENGINES_DIR.iterdir(), reverse=True):
+            if not entry.is_dir():
+                continue
+            # Try to find a binary directly in this folder or via a version.json
+            vj_path = entry / "version.json"
+            vj = None
+            if vj_path.exists():
+                try:
+                    with open(vj_path, "r", encoding="utf-8") as f:
+                        vj = json.load(f)
+                except Exception:
+                    pass
+            
+            # Find binary in this bundled folder
+            binary = _find_binary_in_dir(entry)
+            if binary and binary.is_file() and validate_engine(str(binary)):
+                # If we found a valid bundled binary, return it
+                return _build_status(str(binary), vj)
 
     return None
 

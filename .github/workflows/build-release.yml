@@ -79,9 +79,40 @@ jobs:
           pip install -r requirements.txt
 
       # ── 5. Build executable ──────────────────────────────────────────────
+      - name: Prepare bundled engine (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "src/assets/engines/default"
+          $url = "https://github.com/official-stockfish/Stockfish/releases/download/sf_18/stockfish-windows-x86-64-modern.zip"
+          Write-Host "Downloading bundled engine from $url ..."
+          Invoke-WebRequest -Uri $url -OutFile "sf.zip"
+          Expand-Archive -Path "sf.zip" -DestinationPath "temp_sf"
+          $bin = Get-ChildItem -Path "temp_sf" -Filter "stockfish*.exe" -Recurse | Select-Object -First 1
+          Move-Item -Path $bin.FullName -Destination "src/assets/engines/default/stockfish.exe"
+          # Create a basic version.json
+          '{"version":"18","build":"modern","arch":"x86-64","binary_path":"src/assets/engines/default/stockfish.exe"}' | Out-File -FilePath "src/assets/engines/default/version.json" -Encoding utf8
+
       - name: Build with PyInstaller (Windows)
         if: runner.os == 'Windows'
         run: pyinstaller PawnBit.spec
+
+      - name: Prepare bundled engine (macOS / Linux)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p src/assets/engines/default
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            URL="https://github.com/official-stockfish/Stockfish/releases/download/sf_18/stockfish-macos-arm64-apple-silicon.tar"
+          else
+            URL="https://github.com/official-stockfish/Stockfish/releases/download/sf_18/stockfish-ubuntu-x86-64-modern.tar"
+          fi
+          echo "Downloading bundled engine for ${{ runner.os }} from $URL ..."
+          curl -L -o sf.tar "$URL"
+          tar -xf sf.tar
+          BIN=$(find . -maxdepth 4 -name "stockfish*" -type f ! -name "*.tar" ! -name "*.zip" | head -n 1)
+          cp "$BIN" src/assets/engines/default/stockfish
+          chmod +x src/assets/engines/default/stockfish
+          echo '{"version":"18","build":"modern","arch":"native","binary_path":"src/assets/engines/default/stockfish"}' > src/assets/engines/default/version.json
 
       - name: Build with PyInstaller (macOS / Linux)
         if: runner.os != 'Windows'
