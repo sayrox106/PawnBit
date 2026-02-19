@@ -1,73 +1,74 @@
 # PawnBit
+
 <a target="_blank" href="https://www.paypal.com/donate/?hosted_button_id=J65KNQYEK88ML">
   <img src="https://img.shields.io/badge/Donate-PayPal-green.svg">
 </a>
 
-A bot for chess.com and lichess.org that automatically plays chess for you  
+A powerful bot for chess.com and lichess.org that automatically plays chess for you with human-like behavior and advanced engine management.
 
 Chess.com  
-![](match_chesscom.gif)  
+![](match_chesscom.gif)
 
 Lichess.org  
 ![](match_lichess.gif)  
-Note that the mouse is being moved by python
+_Note: The mouse is moved by Python in standard mode._
 
-## How to install
-1) Clone the repository or just download the repository as a .zip
-2) Download Stockfish from https://stockfishchess.org/  
-   **Note** that on Linux systems you must manually add execute permissions to the stockfish executable
-3) Open a Terminal
-4) `cd PawnBit`
-5) Windows: `python -m venv venv`  
-   Linux: `python3 -m venv venv`
-6) Windows: `venv\Scripts\pip.exe install -r requirements.txt`  
-   Linux: `venv/bin/pip3 install -r requirements.txt`
+## 🚀 Features
 
-## How to use
-1) Open a Terminal
-2) `cd PawnBit`
-3) Windows: `venv\Scripts\python.exe src\gui.py`  
-   Linux: `venv/bin/python3 src/gui.py`
-4) Click Select Stockfish on the GUI that opens. This will open a file explorer. Navigate to the folder where you downloaded Stockfish and select the Stockfish executable.
-5) Click Open Browser. This will open ChromeDriver and load the selected chess website.
-6) Navigate to a live match (online or vs bot)
-7) Click Start (or press 1)
-8) Enjoy  
+- **Multi-Platform Support**: Windows, Linux, and macOS.
+- **Auto-Engine Management**: Stockfish 18 is bundled with the executable. No manual download required for fresh installs.
+- **Human-like Behavior**:
+  - **Random Delays**: Simulates human thinking time with configurable minimum delays.
+  - **Mouse Latency**: Adjustable movement speed.
+- **Gameplay Modes**:
+  - **Auto Mode**: Full automatic play.
+  - **Manual Mode**: Visualizes moves via an overlay; press `3` to execute the move.
+  - **Mouseless Mode**: Injects moves directly (works in background).
+  - **Non-stop Mode**: Automatically cues into the next match or puzzle.
+- **Smart Analytics**:
+  - Real-time evaluation bar and W/D/L stats.
+  - Material advantage tracking.
+  - Accuracy estimation for you and your opponent.
+- **Customizable Engine**: Control Depth, Skill Level, Memory (Hash), and CPU Threads.
+- **Settings Persistence**: Your configuration is automatically saved and loaded.
 
-**Note** You can stop the bot at any time by pressing Stop or pressing 2.
+## 📥 Installation
 
-## Currently supports
-- Windows/Linux platforms
-- Chess.com
-- Lichess.org
-- Playing vs humans
-- Playing vs bots
-- Puzzles (with option for non-stop solving):
-    - [ ] chess.com
-    - [x] lichess.org
-- Manual mode (Press or hold 3 to move when enabled)  
-  An arrow with the best move is also displayed
-- Mouseless mode (The moves are made without the mouse moving, also works while the browser is at the background):
-    - [ ] chess.com
-    - [x] lichess.org
-- Bongcloud mode ( ͡° ͜ʖ ͡° )
-- Non-stop mode (The bot will play non-stop)
-    - [ ] chess.com
-    - [x] lichess.org
-- Ability to add a fixed amount of mouse latency
-- Skill level selection (0-20)
-- Depth level selection (1-20)
-- Memory (RAM) usage selection
-- CPU threads number selection
-- Slow Mover option (defaults to 100, 10 &le; Slow Mover &le; 1000)  
-  lower values will make Stockfish take less time in games, higher values will make it think longer
-- Exporting finished games to PGN
-- W/D/L, accuracy and material statistics tracking
-- Evaluation bar display on the side
+### 1. Download (Recommended)
 
-## Future features
-- Random delays in between moves to simulate human behavior
+Download the latest pre-built executable from the [Releases](../../releases) page.
 
-## Disclaimer
-Under no circumstances should you use this bot to cheat in online games or tournaments. This bot was made for educational purposes only.
-Using this bot to cheat in online games or tournaments is against the rules of chess.com and will result in a ban.
+- **Windows**: Run `PawnBit-windows.exe`. Stockfish is included!
+- **macOS/Linux**: Download the binary, run `chmod +x PawnBit-platform` and execute.
+
+### 2. From Source
+
+1. Clone the repository: `git clone https://github.com/sayrox106/PawnBit.git`
+2. Open a terminal in the folder.
+3. Setup virtual environment:
+   - **Windows**: `python -m venv venv` then `venv\Scripts\pip install -r requirements.txt`
+   - **Linux/macOS**: `python3 -m venv venv` then `venv/bin/pip3 install -r requirements.txt`
+4. Run:
+   - **Windows**: `venv\Scripts\python.exe src\gui.py`
+   - **Linux/macOS**: `venv/bin/python3 src/gui.py`
+
+## 🎮 How to Use
+
+1. **Open Browser**: Click the button to launch a controlled Chrome instance.
+2. **Navigate**: Go to a live match or puzzle on Chess.com or Lichess.
+3. **Configure**: Adjust your Skill Level, Depth, and Delays in the GUI.
+4. **Start**: Click **Start** (or press `1`).
+5. **Stop**: Click **Stop** (or press `2`) at any time.
+
+## 🛠 Supported Sites & Modes
+
+| Feature             | Chess.com | Lichess.org |
+| ------------------- | :-------: | :---------: |
+| Online Matches      |    ✅     |     ✅      |
+| Puzzles             |    ✅     |     ✅      |
+| Non-stop Mode       |    ✅     |     ✅      |
+| Mouseless Injection |    ✅     |     ✅      |
+
+## ⚠️ Disclaimer
+
+Under no circumstances should you use this bot to cheat in online games or tournaments. This bot was made for **educational purposes only**. Using this bot to cheat in online games or tournaments is against the rules of chess platforms and will result in a ban. The developers are not responsible for any banned accounts.
