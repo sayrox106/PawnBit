@@ -1,4 +1,4 @@
-from selenium.common import NoSuchElementException
+from selenium.common import NoSuchElementException, StaleElementReferenceException
 from selenium.webdriver.common.by import By
 
 from grabbers.grabber import Grabber
@@ -7,132 +7,296 @@ from grabbers.grabber import Grabber
 class ChesscomGrabber(Grabber):
     def __init__(self, chrome_url, chrome_session_id):
         super().__init__(chrome_url, chrome_session_id)
-        # The moves_list is now initialized in the base class
+
+    # ------------------------------------------------------------------
+    # Board element
+    # ------------------------------------------------------------------
 
     def update_board_elem(self):
         try:
-            self._board_elem = self.chrome.find_element(By.XPATH, "//*[@id='board-play-computer']")
+            self._board_elem = self.chrome.find_element(
+                By.XPATH, "//*[@id='board-play-computer']"
+            )
         except NoSuchElementException:
             try:
-                self._board_elem = self.chrome.find_element(By.XPATH, "//*[@id='board-single']")
+                self._board_elem = self.chrome.find_element(
+                    By.XPATH, "//*[@id='board-single']"
+                )
             except NoSuchElementException:
-                self._board_elem = None
+                try:
+                    # Puzzle board
+                    self._board_elem = self.chrome.find_element(
+                        By.XPATH, "//*[@id='board-puzzle']"
+                    )
+                except NoSuchElementException:
+                    self._board_elem = None
+
+    # ------------------------------------------------------------------
+    # Color detection
+    # ------------------------------------------------------------------
 
     def is_white(self):
-        # Find the square names list
         square_names = None
         try:
-            coordinates = self.chrome.find_element(By.XPATH, "//*[@id='board-play-computer']//*[name()='svg']")
+            coordinates = self.chrome.find_element(
+                By.XPATH, "//*[@id='board-play-computer']//*[name()='svg']"
+            )
             square_names = coordinates.find_elements(By.XPATH, ".//*")
         except NoSuchElementException:
             try:
-                coordinates = self.chrome.find_elements(By.XPATH, "//*[@id='board-single']//*[name()='svg']")
-                coordinates = [x for x in coordinates if x.get_attribute("class") == "coordinates"][0]
+                coordinates = self.chrome.find_elements(
+                    By.XPATH, "//*[@id='board-single']//*[name()='svg']"
+                )
+                coordinates = [
+                    x for x in coordinates
+                    if x.get_attribute("class") == "coordinates"
+                ][0]
                 square_names = coordinates.find_elements(By.XPATH, ".//*")
-            except NoSuchElementException:
-                return None
+            except (NoSuchElementException, IndexError):
+                try:
+                    # Puzzle board
+                    coordinates = self.chrome.find_element(
+                        By.XPATH, "//*[@id='board-puzzle']//*[name()='svg']"
+                    )
+                    square_names = coordinates.find_elements(By.XPATH, ".//*")
+                except NoSuchElementException:
+                    return None
 
-        # Find the square with the smallest x and biggest y values (bottom left number)
+        if not square_names:
+            return None
+
+        # Find bottom-left square (min x, max y)
         elem = None
         min_x = None
         max_y = None
-        for i in range(len(square_names)):
-            name_element = square_names[i]
-            x = float(name_element.get_attribute("x"))
-            y = float(name_element.get_attribute("y"))
-
-            if i == 0 or (x <= min_x and y >= max_y):
+        for name_element in square_names:
+            try:
+                x = float(name_element.get_attribute("x"))
+                y = float(name_element.get_attribute("y"))
+            except (TypeError, ValueError):
+                continue
+            if min_x is None or (x <= min_x and y >= max_y):
                 min_x = x
                 max_y = y
                 elem = name_element
 
-        # Use this square to determine whether the player is white or black
-        num = elem.text
-        return num == "1"
+        if elem is None:
+            return None
+        return elem.text == "1"
+
+    # ------------------------------------------------------------------
+    # Game-over detection
+    # ------------------------------------------------------------------
 
     def is_game_over(self):
         try:
-            # Find the game over window
-            game_over_window = self.chrome.find_element(By.CLASS_NAME, "board-modal-container")
+            game_over_window = self.chrome.find_element(
+                By.CLASS_NAME, "board-modal-container"
+            )
             return game_over_window is not None
         except NoSuchElementException:
-            # Return False since the game over window is not found
             return False
 
+    # ------------------------------------------------------------------
+    # Moves list
+    # ------------------------------------------------------------------
+
     def reset_moves_list(self):
-        """Reset the moves list when a new game starts"""
         self.moves_list = {}
 
     def get_move_list(self):
-        # Find the moves list
         try:
-            move_list_elem = self.chrome.find_element(By.CLASS_NAME, "play-controller-scrollable")
+            move_list_elem = self.chrome.find_element(
+                By.CLASS_NAME, "play-controller-scrollable"
+            )
         except NoSuchElementException:
             try:
-                move_list_elem = self.chrome.find_element(By.CLASS_NAME, "mode-swap-move-list-wrapper-component")
+                move_list_elem = self.chrome.find_element(
+                    By.CLASS_NAME, "mode-swap-move-list-wrapper-component"
+                )
             except NoSuchElementException:
-                    return None
+                return None
 
-        # Check if we're in a new game by looking at the number of moves
-        # If there are no visible moves but we have moves in our list, we're in a new game
-        visible_moves = move_list_elem.find_elements(By.CSS_SELECTOR, "div.node[data-node]")
+        visible_moves = move_list_elem.find_elements(
+            By.CSS_SELECTOR, "div.node[data-node]"
+        )
         if len(visible_moves) == 0 and self.moves_list:
-            # Reset moves list for new game
             self.reset_moves_list()
 
-        # Select all children with class containing "white node" or "black node"
-        # Moves that are not pawn moves have a different structure
-        # containing children
         if not self.moves_list:
-            # If the moves list is empty, find all moves
             moves = move_list_elem.find_elements(By.CSS_SELECTOR, "div.node[data-node]")
         else:
-            # If the moves list is not empty, find only the new moves
-            moves = move_list_elem.find_elements(By.CSS_SELECTOR, "div.node[data-node]:not([data-processed])")
+            moves = move_list_elem.find_elements(
+                By.CSS_SELECTOR, "div.node[data-node]:not([data-processed])"
+            )
 
         for move in moves:
             move_class = move.get_attribute("class")
-
-            # Check if it is indeed a move
             if "white-move" in move_class or "black-move" in move_class:
-                # Check if it has a figure - search deeper in the structure
                 try:
-                    # Look for any element with data-figurine attribute anywhere within this move
-                    figurine_elem = move.find_element(By.CSS_SELECTOR, "[data-figurine]")
+                    figurine_elem = move.find_element(
+                        By.CSS_SELECTOR, "[data-figurine]"
+                    )
                     figure = figurine_elem.get_attribute("data-figurine")
                 except NoSuchElementException:
                     figure = None
 
-                # Check if it was en-passant or figure-move
                 if figure is None:
-                    # If the moves_list is empty or the last move was not the current move
                     self.moves_list[move.get_attribute("data-node")] = move.text
                 elif "=" in move.text:
                     m = move.text + figure
-                    # If the move is a check, add the + in the end
                     if "+" in m:
-                        m = m.replace("+", "")
-                        m += "+"
-
-                    # If the moves_list is empty or the last move was not the current move
+                        m = m.replace("+", "") + "+"
                     self.moves_list[move.get_attribute("data-node")] = m
                 else:
-                    # If the moves_list is empty or the last move was not the current move
                     self.moves_list[move.get_attribute("data-node")] = figure + move.text
 
-                # Mark the move as processed
-                self.chrome.execute_script("arguments[0].setAttribute('data-processed', 'true')", move)
+                self.chrome.execute_script(
+                    "arguments[0].setAttribute('data-processed', 'true')", move
+                )
 
         return list(self.moves_list.values())
 
+    # ------------------------------------------------------------------
+    # Puzzle / game mode detection
+    # ------------------------------------------------------------------
+
     def is_game_puzzles(self):
-        return False
+        """
+        Detect Chess.com puzzle pages.
+        Chess.com serves puzzles at /puzzles/... with a board id 'board-puzzle'
+        or with a URL containing '/puzzles'.
+        """
+        try:
+            current_url = self.chrome.current_url
+            if "/puzzles" in current_url or "/puzzle" in current_url:
+                return True
+        except Exception:
+            pass
+        # Fallback: try to find the puzzle board element
+        try:
+            self.chrome.find_element(By.XPATH, "//*[@id='board-puzzle']")
+            return True
+        except NoSuchElementException:
+            return False
+
+    # ------------------------------------------------------------------
+    # Non-stop helpers
+    # ------------------------------------------------------------------
 
     def click_puzzle_next(self):
-        pass
+        """Click the 'Next puzzle' / continue button on Chess.com puzzles."""
+        selectors = [
+            # "Next puzzle" button (various class names Chess.com uses)
+            "button.puzzle-buttons-playagain",
+            "button.next-puzzles-start-button",
+            "[class*='next'][class*='puzzle']",
+            "[class*='puzzle'][class*='next']",
+            "button[data-cy='next-puzzle']",
+        ]
+        for selector in selectors:
+            try:
+                btn = self.chrome.find_element(By.CSS_SELECTOR, selector)
+                self.chrome.execute_script("arguments[0].click();", btn)
+                return
+            except NoSuchElementException:
+                continue
+
+        # XPath fallback: any button/anchor containing "Next"
+        try:
+            btn = self.chrome.find_element(
+                By.XPATH, "//*[contains(text(),'Next') or contains(text(),'next')]"
+                          "[self::button or self::a]"
+            )
+            self.chrome.execute_script("arguments[0].click();", btn)
+        except NoSuchElementException:
+            pass
 
     def click_game_next(self):
-        pass
+        """
+        Click 'New game' / 'Play again' after a game ends on Chess.com.
+        """
+        selectors = [
+            "button.board-modal-container-buttons-button",
+            "button[data-cy='new-game-button']",
+            "[class*='play-again']",
+            "[class*='new-game']",
+        ]
+        for selector in selectors:
+            try:
+                btn = self.chrome.find_element(By.CSS_SELECTOR, selector)
+                self.chrome.execute_script("arguments[0].click();", btn)
+                return
+            except NoSuchElementException:
+                continue
+
+        # XPath fallback
+        for text in ("New Game", "Play Again", "Rematch"):
+            try:
+                btn = self.chrome.find_element(
+                    By.XPATH, f"//*[contains(text(),'{text}')]"
+                              "[self::button or self::a]"
+                )
+                self.chrome.execute_script("arguments[0].click();", btn)
+                return
+            except (NoSuchElementException, StaleElementReferenceException):
+                continue
+
+    # ------------------------------------------------------------------
+    # Mouseless move (Chess.com)
+    # ------------------------------------------------------------------
 
     def make_mouseless_move(self, move, move_count):
-        pass
+        """
+        Make a move on Chess.com without moving the mouse by injecting a
+        'move' message through Chess.com's internal game socket/API.
+
+        Chess.com uses a WebAssembly + JS layer.  The most reliable
+        mouseless method is to programmatically click the squares via JS,
+        which avoids triggering anti-cheat flags from pyautogui.
+        """
+        from_sq = move[0:2]   # e.g. "e2"
+        to_sq   = move[2:4]   # e.g. "e4"
+        promo   = move[4] if len(move) == 5 else ""
+
+        script = """
+        (function() {
+            function squareToCoords(sq) {
+                var files = {'a':1,'b':2,'c':3,'d':4,'e':5,'f':6,'g':7,'h':8};
+                return {file: files[sq[0]], rank: parseInt(sq[1])};
+            }
+            var from = squareToCoords(arguments[0]);
+            var to   = squareToCoords(arguments[1]);
+            var promo = arguments[2];
+
+            // Try Chess.com's internal game object
+            try {
+                var game = window.chessboard || window.ChessBoard;
+                if (game && game.game && game.game.move) {
+                    game.game.move({from: arguments[0], to: arguments[1], promotion: promo || 'q'});
+                    return 'api';
+                }
+            } catch(e) {}
+
+            // Fallback: click the from-square, then the to-square
+            // Chess.com renders squares as <div class="square-XX"> where XX = file*10+rank
+            function clickSquare(file, rank) {
+                var sel = '.square-' + (file * 10 + rank);
+                var el = document.querySelector(sel);
+                if (el) {
+                    el.dispatchEvent(new MouseEvent('mousedown', {bubbles:true}));
+                    el.dispatchEvent(new MouseEvent('mouseup',   {bubbles:true}));
+                    el.dispatchEvent(new MouseEvent('click',     {bubbles:true}));
+                    return true;
+                }
+                return false;
+            }
+            clickSquare(from.file, from.rank);
+            setTimeout(function(){ clickSquare(to.file, to.rank); }, 100);
+            return 'click';
+        })();
+        """
+        try:
+            self.chrome.execute_script(script, from_sq, to_sq, promo)
+        except Exception:
+            pass

@@ -1,138 +1,430 @@
-import os
+"""
+gui.py
+======
+Main PawnBit GUI.
 
-import multiprocess
+Engine interaction is done exclusively via engine_manager high-level API:
+  engine_manager.ensure_engine()
+  engine_manager.get_engine_status()
+  engine_manager.install_engine(progress_cb)
+  engine_manager.update_engine(progress_cb)
+
+No terminal logic. No download logic. No subprocess spawning here.
+"""
+# All UI strings are in English (international project).
+
+import os
+import sys
 import threading
 import time
 import tkinter as tk
-from tkinter import ttk, filedialog
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
-from selenium.webdriver.chrome.service import Service as ChromeService
-from overlay import run
-from stockfish_bot import StockfishBot
-from selenium.common import WebDriverException
-import keyboard
+from tkinter import ttk, filedialog, messagebox
+from pathlib import Path
 
+import multiprocess
+
+# Allow running from project root or src/
+_SRC_DIR = Path(__file__).resolve().parent
+if str(_SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(_SRC_DIR))
+
+# Asset directory: when frozen by PyInstaller assets land in sys._MEIPASS/assets
+if getattr(sys, 'frozen', False):
+    _ASSET_DIR = Path(sys._MEIPASS) / "assets"
+else:
+    _ASSET_DIR = _SRC_DIR / "assets"
+
+from overlay import run as run_overlay
+from stockfish_bot import StockfishBot
+import engine_manager
+
+try:
+    from selenium import webdriver
+    from selenium.webdriver.chrome.service import Service as ChromeService
+    from webdriver_manager.chrome import ChromeDriverManager
+    from selenium.common import WebDriverException
+except ImportError:
+    pass
+
+try:
+    import keyboard as kb
+    _KEYBOARD_AVAILABLE = True
+except ImportError:
+    _KEYBOARD_AVAILABLE = False
+
+
+# ---------------------------------------------------------------------------
+# Engine Status Panel
+# ---------------------------------------------------------------------------
+
+class EngineStatusPanel(tk.Frame):
+    """
+    Displays Stockfish engine status.
+    States:
+      - checking   : grey spinner text
+      - ok         : green checkmark + version info
+      - offline    : yellow / orange – installed but not verified online
+      - missing    : red – not found
+      - update     : shows update banner
+    """
+
+    def __init__(self, master, **kwargs):
+        super().__init__(master, **kwargs)
+        self._state = "checking"
+
+        # Status row
+        status_row = tk.Frame(self)
+        status_row.pack(fill=tk.X, anchor=tk.NW)
+
+        tk.Label(status_row, text="Stockfish Status:", font=("Segoe UI", 9, "bold")).pack(side=tk.LEFT)
+        self._icon_label = tk.Label(status_row, text="⏳", font=("Segoe UI", 9))
+        self._icon_label.pack(side=tk.LEFT, padx=(4, 0))
+        self._info_label = tk.Label(status_row, text="Checking...", font=("Segoe UI", 9))
+        self._info_label.pack(side=tk.LEFT, padx=(2, 0))
+
+        # Update banner (hidden by default)
+        self._update_frame = tk.Frame(self, bg="#FFF3CD", relief=tk.GROOVE, bd=1)
+        self._update_label = tk.Label(
+            self._update_frame, bg="#FFF3CD",
+            text="", font=("Segoe UI", 8)
+        )
+        self._update_label.pack(side=tk.LEFT, padx=4)
+        self._update_btn = tk.Button(
+            self._update_frame, text="Update",
+            font=("Segoe UI", 8), bd=1,
+            command=self._on_update
+        )
+        self._update_btn.pack(side=tk.LEFT, padx=2)
+        self._later_btn = tk.Button(
+            self._update_frame, text="Later",
+            font=("Segoe UI", 8), bd=1,
+            command=self._on_later
+        )
+        self._later_btn.pack(side=tk.LEFT, padx=2)
+
+        self._update_cb = None   # callback(install=True/False)
+
+    # ------------------------------------------------------------------
+    def set_checking(self):
+        self._icon_label.config(text="⏳", fg="#888")
+        self._info_label.config(text="Checking...", fg="#555")
+        self._update_frame.pack_forget()
+
+    def set_ok(self, version: str, build: str, arch: str):
+        lbl = f"Version {version}"
+        if build and build != "?":
+            lbl += f" – {build.upper()}"
+        if arch and arch != "?":
+            lbl += f" – {arch}"
+        self._icon_label.config(text="✓", fg="#2e7d32")
+        self._info_label.config(text=lbl, fg="#2e7d32")
+        self._update_frame.pack_forget()
+
+    def set_offline(self, version: str):
+        self._icon_label.config(text="✓", fg="#e65100")
+        self._info_label.config(text=f"Version {version} [Offline – Update check skipped]", fg="#e65100")
+        self._update_frame.pack_forget()
+
+    def set_missing(self):
+        self._icon_label.config(text="✗", fg="#c62828")
+        self._info_label.config(text="Not found", fg="#c62828")
+        self._update_frame.pack_forget()
+
+    def show_update_banner(self, current: str, latest: str, callback):
+        self._update_label.config(
+            text=f"New version available ({latest}). Update now?"
+        )
+        self._update_cb = callback
+        self._update_frame.pack(fill=tk.X, pady=(4, 0), padx=4)
+
+    def hide_update_banner(self):
+        self._update_frame.pack_forget()
+
+    def _on_update(self):
+        if self._update_cb:
+            self._update_cb(install=True)
+
+    def _on_later(self):
+        self.hide_update_banner()
+        if self._update_cb:
+            self._update_cb(install=False)
+
+
+# ---------------------------------------------------------------------------
+# Engine Installation Dialog
+# ---------------------------------------------------------------------------
+
+class EngineInstallDialog(tk.Toplevel):
+    """
+    Modal dialog for installing Stockfish.
+    Shows a progress bar and status messages during download.
+    """
+
+    def __init__(self, master, on_done_cb):
+        super().__init__(master)
+        self.title("Installing Stockfish")
+        self.resizable(False, False)
+        self.transient(master)
+        self.grab_set()
+        self._on_done_cb = on_done_cb
+        self._cancelled = False
+
+        tk.Label(self, text="Downloading and installing Stockfish...",
+                 font=("Segoe UI", 10, "bold"), pady=10).pack()
+
+        self._stage_label = tk.Label(self, text="Preparing...", font=("Segoe UI", 9))
+        self._stage_label.pack()
+
+        self._progress = ttk.Progressbar(self, orient="horizontal",
+                                          mode="determinate", length=400)
+        self._progress.pack(padx=20, pady=10)
+
+        self._pct_label = tk.Label(self, text="0%", font=("Segoe UI", 9))
+        self._pct_label.pack()
+
+        cancel_btn = tk.Button(self, text="Cancel", command=self._cancel)
+        cancel_btn.pack(pady=(0, 10))
+
+        self.protocol("WM_DELETE_WINDOW", self._cancel)
+        self._start_install()
+
+    def _cancel(self):
+        self._cancelled = True
+        self._on_done_cb(success=False, reason="Cancelled")
+        self.destroy()
+
+    def _start_install(self):
+        def _worker():
+            try:
+                engine_manager.install_engine(progress_cb=self._progress_cb)
+                if not self._cancelled:
+                    self.after(0, self._install_done)
+            except Exception as exc:  # noqa: BLE001
+                # Capture exception message in a local variable so the lambda
+                # closure doesn't try to read 'exc' after the except block ends
+                # (which caused the NameError in Python 3.12+).
+                err_msg = str(exc)
+                if not self._cancelled:
+                    self.after(0, lambda msg=err_msg: self._install_failed(msg))
+
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+
+    def _progress_cb(self, stage: str, done: int, total: int):
+        if self._cancelled:
+            return
+        stage_names = {
+            "detect":   "Detecting system...",
+            "fetch":    "Fetching release info...",
+            "download": "Downloading archive...",
+            "extract":  "Extracting archive...",
+            "done":     "Installation complete.",
+        }
+        label_text = stage_names.get(stage, stage)
+        if total > 0:
+            pct = min(100, int(done / total * 100))
+        elif stage == "done":
+            pct = 100
+        else:
+            pct = 50  # indeterminate-ish
+
+        def _update():
+            if not self._cancelled:
+                self._stage_label.config(text=label_text)
+                self._progress["value"] = pct
+                self._pct_label.config(text=f"{pct}%")
+
+        self.after(0, _update)
+
+    def _install_done(self):
+        if not self._cancelled:
+            self._on_done_cb(success=True, reason="")
+            self.destroy()
+
+    def _install_failed(self, reason: str):
+        if not self._cancelled:
+            self._on_done_cb(success=False, reason=reason)
+            self.destroy()
+
+
+# ---------------------------------------------------------------------------
+# Engine-Not-Found Modal
+# ---------------------------------------------------------------------------
+
+def show_engine_not_found_dialog(master, on_auto_install, on_manual_select, on_cancel):
+    """
+    Modal popup shown after 3 failed engine checks.
+    """
+    dlg = tk.Toplevel(master)
+    dlg.title("Stockfish Engine Not Found")
+    dlg.resizable(False, False)
+    dlg.transient(master)
+    dlg.grab_set()
+    dlg.attributes("-topmost", True)
+
+    tk.Label(
+        dlg,
+        text="Stockfish Engine Not Found",
+        font=("Segoe UI", 12, "bold"),
+        pady=10
+    ).pack()
+
+    tk.Label(
+        dlg,
+        text="PawnBit could not detect a working Stockfish installation.\n"
+             "Please choose an option:",
+        font=("Segoe UI", 9),
+        justify=tk.CENTER,
+        wraplength=380,
+        pady=4
+    ).pack()
+
+    btn_frame = tk.Frame(dlg)
+    btn_frame.pack(pady=12)
+
+    def _auto():
+        dlg.destroy()
+        on_auto_install()
+
+    def _manual():
+        dlg.destroy()
+        on_manual_select()
+
+    def _cancel():
+        dlg.destroy()
+        on_cancel()
+
+    tk.Button(
+        btn_frame, text="🔄  Install Automatically",
+        font=("Segoe UI", 10), width=24, command=_auto, bg="#1565C0", fg="white", bd=0
+    ).pack(pady=3)
+
+    tk.Button(
+        btn_frame, text="📁  Select Manually",
+        font=("Segoe UI", 10), width=24, command=_manual, bg="#37474F", fg="white", bd=0
+    ).pack(pady=3)
+
+    tk.Button(
+        btn_frame, text="❌  Cancel",
+        font=("Segoe UI", 10), width=24, command=_cancel, bd=0
+    ).pack(pady=3)
+
+    dlg.protocol("WM_DELETE_WINDOW", _cancel)
+
+    # Centre on parent
+    dlg.update_idletasks()
+    px = master.winfo_x() + master.winfo_width()  // 2 - dlg.winfo_width()  // 2
+    py = master.winfo_y() + master.winfo_height() // 2 - dlg.winfo_height() // 2
+    dlg.geometry(f"+{px}+{py}")
+
+
+# ---------------------------------------------------------------------------
+# Main GUI
+# ---------------------------------------------------------------------------
 
 class GUI:
     def __init__(self, master):
         self.master = master
 
-        # Used for closing the threads
-        self.exit = False
-
-        # The Selenium Chrome driver
-        self.chrome = None
-
-        # # Used for storing the Stockfish Bot class Instance
-        # self.stockfish_bot = None
-        self.chrome_url = None
-        self.chrome_session_id = None
-
-        # Used for the communication between the GUI
-        # and the Stockfish Bot process
-        self.stockfish_bot_pipe = None
-        self.overlay_screen_pipe = None
-
-        # The Stockfish Bot process
+        # State
+        self.exit               = False
+        self.chrome             = None
+        self.chrome_url         = None
+        self.chrome_session_id  = None
+        self.stockfish_bot_pipe    = None
+        self.overlay_screen_pipe   = None
         self.stockfish_bot_process = None
         self.overlay_screen_process = None
         self.restart_after_stopping = False
+        self.match_moves        = []
 
-        # Used for storing the match moves
-        self.match_moves = []
+        # Engine path (resolved after detection)
+        self.stockfish_path     = ""
+        self._engine_status     = {}
 
-        # Set the window properties
-        master.title("Chess")
+        # Window
+        master.title("PawnBit")
         master.geometry("")
-        master.iconphoto(True, tk.PhotoImage(file="src/assets/pawn_32x32.png"))
+        _icon_path = str(_ASSET_DIR / "pawn_32x32.png")
+        if os.path.isfile(_icon_path):
+            master.iconphoto(True, tk.PhotoImage(file=_icon_path))
         master.resizable(False, False)
         master.attributes("-topmost", True)
         master.protocol("WM_DELETE_WINDOW", self.on_close_listener)
 
-        # Change the style
         style = ttk.Style()
         style.theme_use("clam")
 
-        # Left frame
+        # ── Left frame ────────────────────────────────────────────────────
         left_frame = tk.Frame(master)
 
-        # Create the status text
+        # Engine status panel (top)
+        self.engine_panel = EngineStatusPanel(left_frame)
+        self.engine_panel.pack(anchor=tk.NW, fill=tk.X, pady=(4, 6))
+        self.engine_panel.set_checking()
+
+        # Status
         status_label = tk.Frame(left_frame)
         tk.Label(status_label, text="Status:").pack(side=tk.LEFT)
         self.status_text = tk.Label(status_label, text="Inactive", fg="red")
         self.status_text.pack()
         status_label.pack(anchor=tk.NW)
-        
-        # Create the evaluation info
+
+        # Evaluation info
         self.eval_frame = tk.Frame(left_frame)
-        
-        # Evaluation (centipawns)
         eval_label = tk.Frame(self.eval_frame)
         tk.Label(eval_label, text="Eval:").pack(side=tk.LEFT)
         self.eval_text = tk.Label(eval_label, text="-")
         self.eval_text.pack()
         eval_label.pack(anchor=tk.NW)
-        
-        # WDL (win/draw/loss)
+
         wdl_label = tk.Frame(self.eval_frame)
         tk.Label(wdl_label, text="WDL:").pack(side=tk.LEFT)
         self.wdl_text = tk.Label(wdl_label, text="-")
         self.wdl_text.pack()
         wdl_label.pack(anchor=tk.NW)
-        
-        # Material advantage
+
         material_label = tk.Frame(self.eval_frame)
         tk.Label(material_label, text="Material:").pack(side=tk.LEFT)
         self.material_text = tk.Label(material_label, text="-")
         self.material_text.pack()
         material_label.pack(anchor=tk.NW)
-        
-        # White player accuracy
+
         white_acc_label = tk.Frame(self.eval_frame)
         tk.Label(white_acc_label, text="Bot Acc:").pack(side=tk.LEFT)
         self.white_acc_text = tk.Label(white_acc_label, text="-")
         self.white_acc_text.pack()
         white_acc_label.pack(anchor=tk.NW)
-        
-        # Black player accuracy
+
         black_acc_label = tk.Frame(self.eval_frame)
         tk.Label(black_acc_label, text="Opponent Acc:").pack(side=tk.LEFT)
         self.black_acc_text = tk.Label(black_acc_label, text="-")
         self.black_acc_text.pack()
         black_acc_label.pack(anchor=tk.NW)
-        
+
         self.eval_frame.pack(anchor=tk.NW)
 
-        # Create the website chooser radio buttons
+        # Website chooser
         self.website = tk.StringVar(value="chesscom")
         self.chesscom_radio_button = tk.Radiobutton(
-            left_frame,
-            text="Chess.com",
-            variable=self.website,
-            value="chesscom"
+            left_frame, text="Chess.com", variable=self.website, value="chesscom"
         )
         self.chesscom_radio_button.pack(anchor=tk.NW)
         self.lichess_radio_button = tk.Radiobutton(
-            left_frame,
-            text="Lichess.org",
-            variable=self.website,
-            value="lichess"
+            left_frame, text="Lichess.org", variable=self.website, value="lichess"
         )
         self.lichess_radio_button.pack(anchor=tk.NW)
 
-        # Create the open browser button
+        # Open browser
         self.opening_browser = False
-        self.opened_browser = False
+        self.opened_browser  = False
         self.open_browser_button = tk.Button(
-            left_frame,
-            text="Open Browser",
+            left_frame, text="Open Browser",
             command=self.on_open_browser_button_listener,
         )
         self.open_browser_button.pack(anchor=tk.NW)
 
-        # Create the start button
+        # Start/Stop button
         self.running = False
         self.start_button = tk.Button(
             left_frame, text="Start", command=self.on_start_button_listener
@@ -140,175 +432,148 @@ class GUI:
         self.start_button["state"] = "disabled"
         self.start_button.pack(anchor=tk.NW, pady=5)
 
-        # Create the manual mode checkbox
+        # Manual mode
         self.enable_manual_mode = tk.BooleanVar(value=False)
         self.manual_mode_checkbox = tk.Checkbutton(
-            left_frame,
-            text="Manual Mode",
+            left_frame, text="Manual Mode",
             variable=self.enable_manual_mode,
             command=self.on_manual_mode_checkbox_listener,
         )
         self.manual_mode_checkbox.pack(anchor=tk.NW)
 
-        # Create the manual mode instructions
         self.manual_mode_frame = tk.Frame(left_frame)
         self.manual_mode_label = tk.Label(
             self.manual_mode_frame, text="\u2022 Press 3 to make a move"
         )
         self.manual_mode_label.pack(anchor=tk.NW)
 
-        # Create the mouseless mode checkbox
+        # Mouseless mode
         self.enable_mouseless_mode = tk.BooleanVar(value=False)
         self.mouseless_mode_checkbox = tk.Checkbutton(
-            left_frame,
-            text="Mouseless Mode",
-            variable=self.enable_mouseless_mode
+            left_frame, text="Mouseless Mode", variable=self.enable_mouseless_mode
         )
         self.mouseless_mode_checkbox.pack(anchor=tk.NW)
 
-        # Create the non-stop puzzles check button
+        # Non-stop puzzles
         self.enable_non_stop_puzzles = tk.IntVar(value=0)
         self.non_stop_puzzles_check_button = tk.Checkbutton(
-            left_frame,
-            text="Non-stop puzzles",
-            variable=self.enable_non_stop_puzzles
+            left_frame, text="Non-stop puzzles", variable=self.enable_non_stop_puzzles
         )
         self.non_stop_puzzles_check_button.pack(anchor=tk.NW)
 
-        # Create the non-stop matches check button
+        # Non-stop matches
         self.enable_non_stop_matches = tk.IntVar(value=0)
-        self.non_stop_matches_check_button = tk.Checkbutton(left_frame, text="Non-stop online matches",
-                                                            variable=self.enable_non_stop_matches)
+        self.non_stop_matches_check_button = tk.Checkbutton(
+            left_frame, text="Non-stop online matches",
+            variable=self.enable_non_stop_matches
+        )
         self.non_stop_matches_check_button.pack(anchor=tk.NW)
 
-        # Create the bongcloud check button
+        # Bongcloud
         self.enable_bongcloud = tk.IntVar()
         self.bongcloud_check_button = tk.Checkbutton(
-            left_frame,
-            text="Bongcloud",
-            variable=self.enable_bongcloud
+            left_frame, text="Bongcloud", variable=self.enable_bongcloud
         )
         self.bongcloud_check_button.pack(anchor=tk.NW)
 
-        # Create the mouse latency scale
+        # Human-like Random Delay
+        self.random_delay_enabled = tk.BooleanVar(value=False)
+        self._random_delay_checkbox = tk.Checkbutton(
+            left_frame,
+            text="Human-like Random Delay",
+            variable=self.random_delay_enabled,
+            command=self._on_random_delay_toggle,
+        )
+        self._random_delay_checkbox.pack(anchor=tk.NW)
+
+        # Min-delay sub-frame (shown only when checkbox is ticked)
+        self._random_delay_frame = tk.Frame(left_frame)
+        tk.Label(self._random_delay_frame, text="Min. delay (seconds)").pack(
+            side=tk.LEFT
+        )
+        self.random_delay_min = tk.DoubleVar(value=0.0)
+        self._random_delay_scale = tk.Scale(
+            self._random_delay_frame, from_=0.0, to=10.0, resolution=0.1,
+            orient=tk.HORIZONTAL, variable=self.random_delay_min, length=120
+        )
+        self._random_delay_scale.pack(side=tk.LEFT)
+
+        # Mouse latency
         mouse_latency_frame = tk.Frame(left_frame)
-        tk.Label(mouse_latency_frame, text="Mouse Latency (seconds)").pack(side=tk.LEFT, pady=(17, 0))
+        tk.Label(mouse_latency_frame, text="Mouse Latency (seconds)").pack(
+            side=tk.LEFT, pady=(17, 0)
+        )
         self.mouse_latency = tk.DoubleVar(value=0.0)
-        self.mouse_latency_scale = tk.Scale(mouse_latency_frame, from_=0.0, to=15, resolution=0.2, orient=tk.HORIZONTAL,
-                                          variable=self.mouse_latency)
+        self.mouse_latency_scale = tk.Scale(
+            mouse_latency_frame, from_=0.0, to=15, resolution=0.2,
+            orient=tk.HORIZONTAL, variable=self.mouse_latency
+        )
         self.mouse_latency_scale.pack()
         mouse_latency_frame.pack(anchor=tk.NW)
+        # Start hidden; _on_random_delay_toggle will show it when needed
 
-        # Separator
-        separator_frame = tk.Frame(left_frame)
-        separator = ttk.Separator(separator_frame, orient="horizontal")
-        separator.grid(row=0, column=0, sticky="ew")
-        label = tk.Label(separator_frame, text="Stockfish parameters")
-        label.grid(row=0, column=0, padx=40)
-        separator_frame.pack(anchor=tk.NW, pady=10, expand=True, fill=tk.X)
+        # Separator – Stockfish parameters
+        self._add_separator(left_frame, "Stockfish parameters")
 
-        # Create the Slow mover entry field
+        # Slow mover
         slow_mover_frame = tk.Frame(left_frame)
-        self.slow_mover_label = tk.Label(slow_mover_frame, text="Slow Mover")
-        self.slow_mover_label.pack(side=tk.LEFT)
+        tk.Label(slow_mover_frame, text="Slow Mover").pack(side=tk.LEFT)
         self.slow_mover = tk.IntVar(value=100)
-        self.slow_mover_entry = tk.Entry(
-            slow_mover_frame, textvariable=self.slow_mover, justify="center", width=8
-        )
-        self.slow_mover_entry.pack()
+        tk.Entry(slow_mover_frame, textvariable=self.slow_mover, justify="center", width=8).pack()
         slow_mover_frame.pack(anchor=tk.NW)
 
-        # Create the skill level scale
+        # Skill level
         skill_level_frame = tk.Frame(left_frame)
         tk.Label(skill_level_frame, text="Skill Level").pack(side=tk.LEFT, pady=(19, 0))
         self.skill_level = tk.IntVar(value=20)
-        self.skill_level_scale = tk.Scale(
-            skill_level_frame,
-            from_=0,
-            to=20,
-            orient=tk.HORIZONTAL,
-            variable=self.skill_level,
-        )
-        self.skill_level_scale.pack()
+        tk.Scale(
+            skill_level_frame, from_=0, to=20, orient=tk.HORIZONTAL,
+            variable=self.skill_level
+        ).pack()
         skill_level_frame.pack(anchor=tk.NW)
 
-        # Create the Stockfish depth scale
+        # Depth
         stockfish_depth_frame = tk.Frame(left_frame)
         tk.Label(stockfish_depth_frame, text="Depth").pack(side=tk.LEFT, pady=19)
         self.stockfish_depth = tk.IntVar(value=15)
-        self.stockfish_depth_scale = tk.Scale(
-            stockfish_depth_frame,
-            from_=1,
-            to=20,
-            orient=tk.HORIZONTAL,
-            variable=self.stockfish_depth,
-        )
-        self.stockfish_depth_scale.pack()
+        tk.Scale(
+            stockfish_depth_frame, from_=1, to=20, orient=tk.HORIZONTAL,
+            variable=self.stockfish_depth
+        ).pack()
         stockfish_depth_frame.pack(anchor=tk.NW)
 
-        # Create the memory entry field
+        # Memory
         memory_frame = tk.Frame(left_frame)
         tk.Label(memory_frame, text="Memory").pack(side=tk.LEFT)
         self.memory = tk.IntVar(value=512)
-        self.memory_entry = tk.Entry(
-            memory_frame, textvariable=self.memory, justify="center", width=9
-        )
-        self.memory_entry.pack(side=tk.LEFT)
+        tk.Entry(memory_frame, textvariable=self.memory, justify="center", width=9).pack(side=tk.LEFT)
         tk.Label(memory_frame, text="MB").pack()
         memory_frame.pack(anchor=tk.NW, pady=(0, 15))
 
-        # Create the CPU threads entry field
+        # CPU threads
         cpu_threads_frame = tk.Frame(left_frame)
         tk.Label(cpu_threads_frame, text="CPU Threads").pack(side=tk.LEFT)
         self.cpu_threads = tk.IntVar(value=1)
-        self.cpu_threads_entry = tk.Entry(
-            cpu_threads_frame, textvariable=self.cpu_threads, justify="center", width=7
-        )
-        self.cpu_threads_entry.pack()
+        tk.Entry(cpu_threads_frame, textvariable=self.cpu_threads, justify="center", width=7).pack()
         cpu_threads_frame.pack(anchor=tk.NW)
 
-        # Separator
-        separator_frame = tk.Frame(left_frame)
-        separator = ttk.Separator(separator_frame, orient="horizontal")
-        separator.grid(row=0, column=0, sticky="ew")
-        label = tk.Label(separator_frame, text="Misc")
-        label.grid(row=0, column=0, padx=82)
-        separator_frame.pack(anchor=tk.NW, pady=10, expand=True, fill=tk.X)
+        # Separator – Misc
+        self._add_separator(left_frame, "Misc", padx=82)
 
-        # Create the topmost check button
+        # Always on top
         self.enable_topmost = tk.IntVar(value=1)
-        self.topmost_check_button = tk.Checkbutton(
-            left_frame,
-            text="Window stays on top",
+        tk.Checkbutton(
+            left_frame, text="Window stays on top",
             variable=self.enable_topmost,
-            onvalue=1,
-            offvalue=0,
             command=self.on_topmost_check_button_listener,
-        )
-        self.topmost_check_button.pack(anchor=tk.NW)
-
-        # Create the select stockfish button
-        self.stockfish_path = ""
-        self.select_stockfish_button = tk.Button(
-            left_frame,
-            text="Select Stockfish",
-            command=self.on_select_stockfish_button_listener,
-        )
-        self.select_stockfish_button.pack(anchor=tk.NW)
-
-        # Create the stockfish path text
-        self.stockfish_path_text = tk.Label(left_frame, text="", wraplength=180)
-        self.stockfish_path_text.pack(anchor=tk.NW)
+        ).pack(anchor=tk.NW)
 
         left_frame.grid(row=0, column=0, padx=5, sticky=tk.NW)
 
-        # Right frame
+        # ── Right frame ───────────────────────────────────────────────────
         right_frame = tk.Frame(master)
 
-        # Treeview frame
         treeview_frame = tk.Frame(right_frame)
-
-        # Create the moves Treeview
         self.tree = ttk.Treeview(
             treeview_frame,
             column=("#", "White", "Black"),
@@ -318,16 +583,10 @@ class GUI:
         )
         self.tree.pack(anchor=tk.NW, side=tk.LEFT)
 
-        # # Add the scrollbar to the Treeview
-        self.vsb = ttk.Scrollbar(
-            treeview_frame,
-            orient="vertical",
-            command=self.tree.yview
-        )
+        self.vsb = ttk.Scrollbar(treeview_frame, orient="vertical", command=self.tree.yview)
         self.vsb.pack(fill=tk.Y, expand=True)
         self.tree.configure(yscrollcommand=self.vsb.set)
 
-        # Create the columns
         self.tree.column("# 1", anchor=tk.CENTER, width=35)
         self.tree.heading("# 1", text="#")
         self.tree.column("# 2", anchor=tk.CENTER, width=60)
@@ -337,7 +596,6 @@ class GUI:
 
         treeview_frame.pack(anchor=tk.NW)
 
-        # Create the export PGN button
         self.export_pgn_button = tk.Button(
             right_frame, text="Export PGN", command=self.on_export_pgn_button_listener
         )
@@ -345,33 +603,283 @@ class GUI:
 
         right_frame.grid(row=0, column=1, sticky=tk.NW)
 
-        # Start the process checker thread
-        process_checker_thread = threading.Thread(target=self.process_checker_thread)
-        process_checker_thread.start()
+        # ── Background threads ────────────────────────────────────────────
+        threading.Thread(target=self.process_checker_thread, daemon=True).start()
+        threading.Thread(target=self.browser_checker_thread, daemon=True).start()
+        threading.Thread(target=self.process_communicator_thread, daemon=True).start()
+        if _KEYBOARD_AVAILABLE:
+            threading.Thread(target=self.keypress_listener_thread, daemon=True).start()
 
-        # Start the browser checker thread
-        browser_checker_thread = threading.Thread(target=self.browser_checker_thread)
-        browser_checker_thread.start()
+        # ── Engine detection on startup (non-blocking) ───────────────────
+        self._load_settings()
+        threading.Thread(target=self._startup_engine_check, daemon=True).start()
 
-        # Start the process communicator thread
-        process_communicator_thread = threading.Thread(
-            target=self.process_communicator_thread
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _on_random_delay_toggle(self):
+        """Show/hide the min-delay slider based on the checkbox state."""
+        if self.random_delay_enabled.get():
+            self._random_delay_frame.pack(anchor=tk.NW, padx=(16, 0), after=self._random_delay_checkbox)
+        else:
+            self._random_delay_frame.pack_forget()
+
+    def _save_settings(self):
+        """Persist UI settings to config.json."""
+        try:
+            cfg = engine_manager.get_config()
+            cfg["website"]              = self.website.get()
+            cfg["manual_mode"]          = self.enable_manual_mode.get()
+            cfg["mouseless_mode"]       = self.enable_mouseless_mode.get()
+            cfg["non_stop_puzzles"]      = self.enable_non_stop_puzzles.get()
+            cfg["non_stop_matches"]      = self.enable_non_stop_matches.get()
+            cfg["bongcloud"]            = self.enable_bongcloud.get()
+            cfg["mouse_latency"]        = self.mouse_latency.get()
+            cfg["random_delay_enabled"] = bool(self.random_delay_enabled.get())
+            cfg["random_delay_min"]     = self.random_delay_min.get()
+            cfg["slow_mover"]           = self.slow_mover.get()
+            cfg["skill_level"]          = self.skill_level.get()
+            cfg["depth"]                = self.stockfish_depth.get()
+            cfg["memory"]               = self.memory.get()
+            cfg["cpu_threads"]          = self.cpu_threads.get()
+            cfg["topmost"]              = self.enable_topmost.get()
+            engine_manager.save_config(cfg)
+        except Exception:
+            pass
+
+    def _load_settings(self):
+        """Load UI settings from config.json on startup."""
+        cfg = engine_manager.get_config()
+        if "website" in cfg:              self.website.set(cfg["website"])
+        if "manual_mode" in cfg:          self.enable_manual_mode.set(cfg["manual_mode"])
+        if "mouseless_mode" in cfg:       self.enable_mouseless_mode.set(cfg["mouseless_mode"])
+        if "non_stop_puzzles" in cfg:      self.enable_non_stop_puzzles.set(cfg["non_stop_puzzles"])
+        if "non_stop_matches" in cfg:      self.enable_non_stop_matches.set(cfg["non_stop_matches"])
+        if "bongcloud" in cfg:            self.enable_bongcloud.set(cfg["bongcloud"])
+        if "mouse_latency" in cfg:        self.mouse_latency.set(cfg["mouse_latency"])
+        if "random_delay_enabled" in cfg: self.random_delay_enabled.set(cfg["random_delay_enabled"])
+        if "random_delay_min" in cfg:     self.random_delay_min.set(cfg["random_delay_min"])
+        if "slow_mover" in cfg:           self.slow_mover.set(cfg["slow_mover"])
+        if "skill_level" in cfg:          self.skill_level.set(cfg["skill_level"])
+        if "depth" in cfg:                self.stockfish_depth.set(cfg["depth"])
+        if "memory" in cfg:               self.memory.set(cfg["memory"])
+        if "cpu_threads" in cfg:          self.cpu_threads.set(cfg["cpu_threads"])
+        if "topmost" in cfg:
+            self.enable_topmost.set(cfg["topmost"])
+            self.on_topmost_check_button_listener()
+
+        # Refresh dependent UI visibility
+        self.on_manual_mode_checkbox_listener()
+        self._on_random_delay_toggle()
+
+    def _add_separator(self, parent, text, padx=40):
+        f = tk.Frame(parent)
+        sep = ttk.Separator(f, orient="horizontal")
+        sep.grid(row=0, column=0, sticky="ew")
+        lbl = tk.Label(f, text=text)
+        lbl.grid(row=0, column=0, padx=padx)
+        f.pack(anchor=tk.NW, pady=10, expand=True, fill=tk.X)
+
+    # ------------------------------------------------------------------
+    # Engine detection / installation flow (all non-blocking)
+    # ------------------------------------------------------------------
+
+    def _startup_engine_check(self):
+        """Run in background thread. Perform up to 3 fast engine checks."""
+        # Increased timeout to 5.0s because Windows Defender can be slow
+        result = engine_manager.ensure_engine(timeout=5.0)
+
+        if result and result.get("valid"):
+            self.stockfish_path = result["binary_path"]
+            self._engine_status = result
+            self.master.after(0, self._on_engine_found, result)
+            # Async update check (fire-and-forget)
+            threading.Thread(target=self._check_updates_async, daemon=True).start()
+        else:
+            self.master.after(0, self._on_engine_not_found)
+
+    def _on_engine_found(self, status: dict):
+        """GUI thread: engine successfully detected."""
+        self.engine_panel.set_ok(
+            version=status.get("version", "?"),
+            build=status.get("build", "?"),
+            arch=status.get("arch", "?"),
         )
-        process_communicator_thread.start()
 
-        # Start the keyboard listener thread
-        keyboard_listener_thread = threading.Thread(
-            target=self.keypress_listener_thread
+    def _on_engine_not_found(self):
+        """GUI thread: show the not-found popup after 3 failed checks."""
+        self.engine_panel.set_missing()
+        show_engine_not_found_dialog(
+            self.master,
+            on_auto_install=self._do_auto_install,
+            on_manual_select=self._do_manual_select,
+            on_cancel=self._do_cancel_engine,
         )
-        keyboard_listener_thread.start()
 
-    # Detects if the user pressed the close button
+    def _do_auto_install(self):
+        """Open the install dialog and run installation in background."""
+        EngineInstallDialog(self.master, on_done_cb=self._on_install_done)
+
+    def _on_install_done(self, success: bool, reason: str):
+        """Called when the installation dialog finishes."""
+        if success:
+            status = engine_manager.get_engine_status()
+            if status.get("valid"):
+                self.stockfish_path = status["binary_path"]
+                self._engine_status = status
+                self.engine_panel.set_ok(
+                    version=status.get("version", "?"),
+                    build=status.get("build", "?"),
+                    arch=status.get("arch", "?"),
+                )
+                messagebox.showinfo(
+                    "Engine Installed",
+                    f"Stockfish {status.get('version', '')} was installed successfully.",
+                )
+            else:
+                messagebox.showerror(
+                    "Error",
+                    "Installation appeared successful, but the engine could not be validated."
+                )
+        else:
+            if reason and reason != "Cancelled":
+                messagebox.showerror(
+                    "Installation Error",
+                    f"Installation failed:\n{reason}"
+                )
+
+    def _do_manual_select(self):
+        """Open file picker, validate selected binary, store it."""
+        filetypes = [
+            ("Executable files", "*.exe *.EXE stockfish stockfish*"),
+            ("All files", "*.*"),
+        ]
+        path = filedialog.askopenfilename(
+            title="Select Stockfish binary",
+            filetypes=filetypes,
+        )
+        if not path:
+            return
+
+        from pathlib import Path as _P
+        abs_path = str(_P(path).resolve())
+
+        # Validate in a thread so GUI doesn't block
+        def _validate():
+            valid = engine_manager.validate_engine(abs_path)
+            self.master.after(0, lambda: self._on_manual_validate(abs_path, valid))
+
+        threading.Thread(target=_validate, daemon=True).start()
+
+    def _on_manual_validate(self, abs_path: str, valid: bool):
+        if not valid:
+            messagebox.showerror(
+                "Invalid Engine",
+                "The selected file is not a valid UCI engine."
+            )
+            return
+
+        # Try to read version
+        try:
+            import subprocess as _sp
+            proc = _sp.Popen(
+                [abs_path], stdin=_sp.PIPE, stdout=_sp.PIPE, stderr=_sp.PIPE, text=True
+            )
+            proc.stdin.write("uci\n")
+            proc.stdin.flush()
+            out = ""
+            t0 = time.monotonic()
+            while time.monotonic() - t0 < 1.0:
+                line = proc.stdout.readline()
+                out += line
+                if "uciok" in line:
+                    break
+            proc.kill()
+        except Exception:
+            out = ""
+
+        import re
+        vm = re.search(r"Stockfish[_ ](\d+(?:\.\d+)*)", out, re.IGNORECASE)
+        version = vm.group(1) if vm else "?"
+
+        from pathlib import Path as _P
+        version_dir_name = f"stockfish-{version}"
+        version_dir = engine_manager._ENGINES_DIR / version_dir_name
+        version_dir.mkdir(parents=True, exist_ok=True)
+
+        # Copy the binary to the versioned dir if it's not already there
+        dest_bin = version_dir / _P(abs_path).name
+        if not dest_bin.exists():
+            import shutil as _sh
+            _sh.copy2(abs_path, dest_bin)
+
+        # Relative path
+        try:
+            rel = dest_bin.relative_to(engine_manager._BASE_DIR)
+            rel_str = str(rel).replace("\\", "/")
+        except ValueError:
+            rel_str = str(dest_bin)
+
+        meta = {
+            "version":     version,
+            "arch":        engine_manager.detect_system()["arch"],
+            "build":       "manual",
+            "binary_path": rel_str,
+        }
+        engine_manager._write_version_json(version_dir, meta)
+
+        cfg = engine_manager._load_config()
+        cfg["stockfish_path"]    = rel_str
+        cfg["stockfish_version"] = version
+        engine_manager._save_config(cfg)
+
+        self.stockfish_path = str(dest_bin)
+        self._engine_status = engine_manager.get_engine_status()
+        self.engine_panel.set_ok(version=version, build="manual", arch="?")
+
+    def _do_cancel_engine(self):
+        """User chose to cancel engine setup."""
+        self.engine_panel.set_missing()
+
+    def _check_updates_async(self):
+        """Background thread: check for Stockfish updates."""
+        try:
+            info = engine_manager.check_for_updates()
+            if info:
+                self.master.after(
+                    0,
+                    lambda: self.engine_panel.show_update_banner(
+                        info["current"], info["latest"],
+                        self._on_update_banner_choice
+                    )
+                )
+        except Exception:
+            # Offline / rate-limited: show offline status
+            status = self._engine_status
+            self.master.after(
+                0,
+                lambda: self.engine_panel.set_offline(status.get("version", "?"))
+            )
+
+    def _on_update_banner_choice(self, install: bool):
+        if install:
+            EngineInstallDialog(self.master, on_done_cb=self._on_install_done)
+
+    # ------------------------------------------------------------------
+    # Window / lifecycle
+    # ------------------------------------------------------------------
+
     def on_close_listener(self):
-        # Set self.exit to True so that the threads will stop
         self.exit = True
+        self.on_stop_button_listener()  # Kill child processes
         self.master.destroy()
+        sys.exit(0)
 
-    # Detects if the Stockfish Bot process is running
+    # ------------------------------------------------------------------
+    # Background threads
+    # ------------------------------------------------------------------
+
     def process_checker_thread(self):
         while not self.exit:
             if (
@@ -380,49 +888,31 @@ class GUI:
                 and not self.stockfish_bot_process.is_alive()
             ):
                 self.on_stop_button_listener()
-
-                # Restart the process if restart_after_stopping is True
                 if self.restart_after_stopping:
                     self.restart_after_stopping = False
                     self.on_start_button_listener()
             time.sleep(0.1)
 
-    # Detects if Selenium Chromedriver is running
     def browser_checker_thread(self):
+        """Checks if the browser window has been closed by the user."""
         while not self.exit:
-            try:
-                if (
-                    self.opened_browser
-                    and self.chrome is not None
-                    and "target window already closed"
-                    in self.chrome.get_log("driver")[-1]["message"]
-                ):
+            if self.opened_browser and self.chrome is not None:
+                try:
+                    # Simple check: if window_handles is empty or raises Exception, browser is gone
+                    _ = self.chrome.window_handles
+                except Exception:
+                    # Browser was closed
                     self.opened_browser = False
+                    self.master.after(0, self._on_browser_closed_externally)
+            time.sleep(0.5)
 
-                    # Set Opening Browser button state to closed
-                    self.open_browser_button["text"] = "Open Browser"
-                    self.open_browser_button["state"] = "normal"
-                    self.open_browser_button.update()
+    def _on_browser_closed_externally(self):
+        """GUI thread: handle external browser closure."""
+        self.open_browser_button["text"] = "Open Browser"
+        self.open_browser_button["state"] = "normal"
+        self.on_stop_button_listener()
+        self.chrome = None
 
-                    self.on_stop_button_listener()
-                    self.chrome = None
-            except IndexError:
-                pass
-            time.sleep(0.1)
-
-    # Responsible for communicating with the Stockfish Bot process
-    # The pipe can receive the following commands:
-    # - "START": Resets and starts the Stockfish Bot
-    # - "S_MOVE": Sends the Stockfish Bot a single move to make
-    #   Ex. "S_MOVEe4
-    # - "M_MOVE": Sends the Stockfish Bot multiple moves to make
-    #   Ex. "S_MOVEe4,c5,Nf3
-    # - "ERR_EXE": Notifies the GUI that the Stockfish Bot can't initialize Stockfish
-    # - "ERR_PERM": Notifies the GUI that the Stockfish Bot can't execute the Stockfish executable
-    # - "ERR_BOARD": Notifies the GUI that the Stockfish Bot can't find the board
-    # - "ERR_COLOR": Notifies the GUI that the Stockfish Bot can't find the player color
-    # - "ERR_MOVES": Notifies the GUI that the Stockfish Bot can't find the moves list
-    # - "ERR_GAMEOVER": Notifies the GUI that the current game is already over
     def process_communicator_thread(self):
         while not self.exit:
             try:
@@ -434,13 +924,9 @@ class GUI:
                     if data == "START":
                         self.clear_tree()
                         self.match_moves = []
-
-                        # Update the status text
                         self.status_text["text"] = "Running"
                         self.status_text["fg"] = "green"
                         self.status_text.update()
-
-                        # Update the run button
                         self.start_button["text"] = "Stop"
                         self.start_button["state"] = "normal"
                         self.start_button["command"] = self.on_stop_button_listener
@@ -459,46 +945,22 @@ class GUI:
                         self.set_moves(moves)
                         self.tree.yview_moveto(1)
                     elif data[:5] == "EVAL|":
-                        # Parse evaluation data
                         parts = data.split("|")
                         if len(parts) >= 5:
-                            eval_str, wdl_str, material_str, bot_accuracy_str, opponent_accuracy_str  = parts[1:]
-                            
-                            bot_acc = bot_accuracy_str
-                            opponent_acc = opponent_accuracy_str
-                            
-                            # Update the evaluation info
-                            self.update_evaluation_display(eval_str, wdl_str, material_str, bot_acc, opponent_acc)
+                            eval_str, wdl_str, material_str, bot_acc, opp_acc = parts[1:]
+                            self.update_evaluation_display(eval_str, wdl_str, material_str, bot_acc, opp_acc)
                     elif data[:7] == "ERR_EXE":
-                        tk.messagebox.showerror(
-                            "Error",
-                            "Stockfish path provided is not valid!"
-                        )
+                        messagebox.showerror("Error", "Stockfish path provided is not valid!")
                     elif data[:8] == "ERR_PERM":
-                        tk.messagebox.showerror(
-                            "Error",
-                            "Stockfish path provided is not executable!"
-                        )
+                        messagebox.showerror("Error", "Stockfish path provided is not executable!")
                     elif data[:9] == "ERR_BOARD":
-                        tk.messagebox.showerror(
-                            "Error",
-                            "Cant find board!"
-                        )
+                        messagebox.showerror("Error", "Cant find board!")
                     elif data[:9] == "ERR_COLOR":
-                        tk.messagebox.showerror(
-                            "Error",
-                            "Cant find player color!"
-                        )
+                        messagebox.showerror("Error", "Cant find player color!")
                     elif data[:9] == "ERR_MOVES":
-                        tk.messagebox.showerror(
-                            "Error",
-                            "Cant find moves list!"
-                        )
+                        messagebox.showerror("Error", "Cant find moves list!")
                     elif data[:12] == "ERR_GAMEOVER":
-                        tk.messagebox.showerror(
-                            "Error",
-                            "Game has already finished!"
-                        )
+                        messagebox.showerror("Error", "Game has already finished!")
             except (BrokenPipeError, OSError):
                 self.stockfish_bot_pipe = None
 
@@ -509,114 +971,120 @@ class GUI:
             time.sleep(0.1)
             if not self.opened_browser:
                 continue
+            if _KEYBOARD_AVAILABLE:
+                if kb.is_pressed("1"):
+                    self.on_start_button_listener()
+                elif kb.is_pressed("2"):
+                    self.on_stop_button_listener()
 
-            if keyboard.is_pressed("1"):
-                self.on_start_button_listener()
-            elif keyboard.is_pressed("2"):
-                self.on_stop_button_listener()
+    # ------------------------------------------------------------------
+    # Button listeners
+    # ------------------------------------------------------------------
 
     def on_open_browser_button_listener(self):
-        # Set Opening Browser button state to opening
         self.opening_browser = True
         self.open_browser_button["text"] = "Opening Browser..."
         self.open_browser_button["state"] = "disabled"
         self.open_browser_button.update()
 
-        # Open Webdriver
-        options = webdriver.ChromeOptions()
-        options.add_experimental_option("excludeSwitches", ["enable-logging", "enable-automation"])
-        options.add_argument('--disable-blink-features=AutomationControlled')
-        options.add_experimental_option('useAutomationExtension', False)
         try:
-            chrome_install = ChromeDriverManager().install()
+            options = webdriver.ChromeOptions()
+            options.add_experimental_option(
+                "excludeSwitches", ["enable-logging", "enable-automation"]
+            )
+            options.add_argument("--disable-blink-features=AutomationControlled")
+            options.add_experimental_option("useAutomationExtension", False)
 
+            chrome_install = ChromeDriverManager().install()
             folder = os.path.dirname(chrome_install)
             chromedriver_path = os.path.join(folder, "chromedriver.exe")
-
             service = ChromeService(chromedriver_path)
-            self.chrome = webdriver.Chrome(
-                service=service,
-                options=options
-            )
+            self.chrome = webdriver.Chrome(service=service, options=options)
         except WebDriverException:
-            # No chrome installed
-            self.opening_browser = False
-            self.open_browser_button["text"] = "Open Browser"
-            self.open_browser_button["state"] = "normal"
-            self.open_browser_button.update()
-            tk.messagebox.showerror(
+            self._reset_browser_button()
+            messagebox.showerror(
                 "Error",
                 "Cant find Chrome. You need to have Chrome installed for this to work.",
             )
             return
         except Exception as e:
-            # Other error
-            self.opening_browser = False
-            self.open_browser_button["text"] = "Open Browser"
-            self.open_browser_button["state"] = "normal"
-            self.open_browser_button.update()
-            tk.messagebox.showerror(
-                "Error",
-                f"An error occurred while opening the browser: {e}",
-            )
+            self._reset_browser_button()
+            messagebox.showerror("Error", f"An error occurred while opening the browser: {e}")
             return
 
-        # Open chess.com
         if self.website.get() == "chesscom":
             self.chrome.get("https://www.chess.com")
         else:
             self.chrome.get("https://www.lichess.org")
 
-        # Build Stockfish Bot
-        self.chrome_url = self.chrome.service.service_url
+        self.chrome_url        = self.chrome.service.service_url
         self.chrome_session_id = self.chrome.session_id
 
-        # Set Opening Browser button state to opened
         self.opening_browser = False
-        self.opened_browser = True
+        self.opened_browser  = True
         self.open_browser_button["text"] = "Browser is open"
         self.open_browser_button["state"] = "disabled"
         self.open_browser_button.update()
 
-        # Enable run button
         self.start_button["state"] = "normal"
         self.start_button.update()
 
+    def _reset_browser_button(self):
+        self.opening_browser = False
+        self.open_browser_button["text"] = "Open Browser"
+        self.open_browser_button["state"] = "normal"
+        self.open_browser_button.update()
+
     def on_start_button_listener(self):
-        # Check if Slow mover value is valid
-        slow_mover = self.slow_mover.get()
-        if slow_mover < 10 or slow_mover > 1000:
-            tk.messagebox.showerror(
-                "Error",
-                "Slow Mover must be between 10 and 1000"
-            )
+        try:
+            slow_mover = self.slow_mover.get()
+            if slow_mover < 10 or slow_mover > 1000:
+                raise ValueError
+        except (ValueError, tk.TclError):
+            messagebox.showerror("Error", "Slow Mover must be between 10 and 1000")
             return
 
-        # Check if stockfish path is not empty
-        if self.stockfish_path == "":
-            tk.messagebox.showerror(
-                "Error",
-                "Stockfish path is empty"
-            )
+        try:
+            mem = self.memory.get()
+            if mem < 16: raise ValueError
+        except (ValueError, tk.TclError):
+            messagebox.showerror("Error", "Memory (Hash) must be at least 16 MB")
             return
 
-        # Check if mouseless mode is enabled when on chess.com
-        if self.enable_mouseless_mode.get() == 1 and self.website.get() == "chesscom":
-            tk.messagebox.showerror(
-                "Error", "Mouseless mode is only supported on lichess.org"
-            )
+        try:
+            thr = self.cpu_threads.get()
+            if thr < 1: raise ValueError
+            # Heuristic: Warn if threads > logical cores
+            import os as _os
+            cores = _os.cpu_count() or 1
+            if thr > cores:
+                if not messagebox.askyesno("Performance Warning", 
+                    f"You have selected {thr} threads, but your system only has {cores} logical cores.\n"
+                    "This may cause lag. Do you want to continue?"):
+                    return
+        except (ValueError, tk.TclError):
+            messagebox.showerror("Error", "Threads must be at least 1")
             return
 
-        # Create the pipes used for the communication
-        # between the GUI and the Stockfish Bot process
+        # Persist these settings before starting
+        self._save_settings()
+
+        if not self.stockfish_path or not os.path.isfile(self.stockfish_path):
+            # Try one more time to resolve from config
+            status = engine_manager.get_engine_status()
+            if status.get("valid"):
+                self.stockfish_path = status["binary_path"]
+            else:
+                messagebox.showerror(
+                    "Engine Missing",
+                    "No valid Stockfish path found. Please install the engine first."
+                )
+                return
+
         parent_conn, child_conn = multiprocess.Pipe()
         self.stockfish_bot_pipe = parent_conn
-
-        # Create the message queue that is used for the communication
-        # between the Stockfish and the Overlay processes
         st_ov_queue = multiprocess.Queue()
 
-        # Create the Stockfish Bot process
         self.stockfish_bot_process = StockfishBot(
             self.chrome_url,
             self.chrome_session_id,
@@ -635,64 +1103,54 @@ class GUI:
             self.stockfish_depth.get(),
             self.memory.get(),
             self.cpu_threads.get(),
+            random_delay_enabled=self.random_delay_enabled.get(),
+            random_delay_min=self.random_delay_min.get(),
         )
         self.stockfish_bot_process.start()
 
-        # Create the overlay
         self.overlay_screen_process = multiprocess.Process(
-            target=run, args=(st_ov_queue,)
+            target=run_overlay, args=(st_ov_queue,)
         )
         self.overlay_screen_process.start()
 
-        # Update the run button
         self.running = True
-        self.start_button["text"] = "Starting..."
+        self.start_button["text"]  = "Starting..."
         self.start_button["state"] = "disabled"
         self.start_button.update()
 
     def on_stop_button_listener(self):
-        # Stop the Stockfish Bot process
         if self.stockfish_bot_process is not None:
             if self.overlay_screen_process is not None:
                 self.overlay_screen_process.kill()
                 self.overlay_screen_process = None
-
             if self.stockfish_bot_process.is_alive():
                 self.stockfish_bot_process.kill()
-
             self.stockfish_bot_process = None
 
-        # Close the Stockfish Bot pipe
         if self.stockfish_bot_pipe is not None:
             self.stockfish_bot_pipe.close()
             self.stockfish_bot_pipe = None
 
-        # Update the status text
         self.running = False
         self.status_text["text"] = "Inactive"
-        self.status_text["fg"] = "red"
+        self.status_text["fg"]   = "red"
         self.status_text.update()
-        
-        # Reset evaluation info
-        self.eval_text["text"] = "-"
-        self.eval_text["fg"] = "black"
-        self.wdl_text["text"] = "-"
-        self.material_text["text"] = "-"
-        self.material_text["fg"] = "black"
+
+        self.eval_text["text"]      = "-"
+        self.eval_text["fg"]        = "black"
+        self.wdl_text["text"]       = "-"
+        self.material_text["text"]  = "-"
+        self.material_text["fg"]    = "black"
         self.white_acc_text["text"] = "-"
         self.black_acc_text["text"] = "-"
-        
-        # Update the UI
-        self.eval_text.update()
-        self.wdl_text.update()
-        self.material_text.update()
-        self.white_acc_text.update()
-        self.black_acc_text.update()
 
-        # Update the run button
+        for w in (self.eval_text, self.wdl_text, self.material_text,
+                  self.white_acc_text, self.black_acc_text):
+            w.update()
+
         if not self.restart_after_stopping:
-            self.start_button["text"] = "Start"
-            self.start_button["state"] = "normal"
+            self.start_button["text"]    = "Start"
+            self.start_button["state"]   = "normal"
             self.start_button["command"] = self.on_start_button_listener
         else:
             self.restart_after_stopping = False
@@ -700,13 +1158,9 @@ class GUI:
         self.start_button.update()
 
     def on_topmost_check_button_listener(self):
-        if self.enable_topmost.get() == 1:
-            self.master.attributes("-topmost", True)
-        else:
-            self.master.attributes("-topmost", False)
+        self.master.attributes("-topmost", self.enable_topmost.get() == 1)
 
     def on_export_pgn_button_listener(self):
-        # Create the file dialog
         f = filedialog.asksaveasfile(
             initialfile="match.pgn",
             defaultextension=".pgn",
@@ -714,8 +1168,6 @@ class GUI:
         )
         if f is None:
             return
-
-        # Write the PGN to the file
         data = ""
         for i in range(len(self.match_moves) // 2 + 1):
             if len(self.match_moves) % 2 == 0 and i == len(self.match_moves) // 2:
@@ -727,23 +1179,22 @@ class GUI:
         f.write(data)
         f.close()
 
-    def on_select_stockfish_button_listener(self):
-        # Create the file dialog
-        f = filedialog.askopenfilename()
-        if f is None:
-            return
+    def on_manual_mode_checkbox_listener(self):
+        if self.enable_manual_mode.get() == 1:
+            self.manual_mode_frame.pack(after=self.manual_mode_checkbox)
+            self.manual_mode_frame.update()
+        else:
+            self.manual_mode_frame.pack_forget()
+            self.manual_mode_checkbox.update()
 
-        # Set the Stockfish path
-        self.stockfish_path = f
-        self.stockfish_path_text["text"] = self.stockfish_path
-        self.stockfish_path_text.update()
+    # ------------------------------------------------------------------
+    # Treeview helpers
+    # ------------------------------------------------------------------
 
-    # Clears the Treeview
     def clear_tree(self):
         self.tree.delete(*self.tree.get_children())
         self.tree.update()
 
-    # Inserts a move into the Treeview
     def insert_move(self, move):
         cells_num = sum(
             [len(self.tree.item(i)["values"]) - 1 for i in self.tree.get_children()]
@@ -755,48 +1206,36 @@ class GUI:
             self.tree.set(self.tree.get_children()[-1], column=2, value=move)
         self.tree.update()
 
-    # Overwrites the Treeview with the given list of moves
     def set_moves(self, moves):
         self.clear_tree()
-
-        # Insert in pairs
         pairs = list(zip(*[iter(moves)] * 2))
         for i, pair in enumerate(pairs):
             self.tree.insert("", "end", text="1", values=(str(i + 1), pair[0], pair[1]))
-
-        # Insert the remaining one if it exists
         if len(moves) % 2 == 1:
             self.tree.insert("", "end", text="1", values=(len(pairs) + 1, moves[-1]))
-
         self.tree.update()
 
-    def on_manual_mode_checkbox_listener(self):
-        if self.enable_manual_mode.get() == 1:
-            self.manual_mode_frame.pack(after=self.manual_mode_checkbox)
-            self.manual_mode_frame.update()
-        else:
-            self.manual_mode_frame.pack_forget()
-            self.manual_mode_checkbox.update()
+    # ------------------------------------------------------------------
+    # Evaluation display
+    # ------------------------------------------------------------------
 
     def update_evaluation_display(self, eval_str, wdl_str, material_str, bot_acc, opponent_acc):
         self.eval_text["text"] = eval_str
-        # Color based on eval (positive = green, negative = red)
         try:
-            if eval_str.startswith("M"):  # Mate
+            if eval_str.startswith("M"):
                 mate_value = int(eval_str[1:])
                 self.eval_text["fg"] = "green" if mate_value > 0 else "red"
-            else:  # Centipawns
+            else:
                 eval_value = float(eval_str)
-                self.eval_text["fg"] = "green" if eval_value > 0 else ("black" if eval_value == 0 else "red")
+                self.eval_text["fg"] = (
+                    "green" if eval_value > 0 else ("black" if eval_value == 0 else "red")
+                )
         except ValueError:
             self.eval_text["fg"] = "black"
-            
-        # Update WDL
-        self.wdl_text["text"] = wdl_str
-        
-        # Update material
+
+        self.wdl_text["text"]      = wdl_str
         self.material_text["text"] = material_str
-        # Color based on material
+
         try:
             if material_str.startswith("+"):
                 self.material_text["fg"] = "green"
@@ -804,22 +1243,23 @@ class GUI:
                 self.material_text["fg"] = "red"
             else:
                 self.material_text["fg"] = "black"
-        except:
+        except Exception:
             self.material_text["fg"] = "black"
-            
-        # Update accuracy values
+
         self.white_acc_text["text"] = bot_acc
         self.black_acc_text["text"] = opponent_acc
-        
-        # Update the UI
-        self.eval_text.update()
-        self.wdl_text.update()
-        self.material_text.update()
-        self.white_acc_text.update()
-        self.black_acc_text.update()
 
+        for w in (self.eval_text, self.wdl_text, self.material_text,
+                  self.white_acc_text, self.black_acc_text):
+            w.update()
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    multiprocess.freeze_support()
     window = tk.Tk()
     my_gui = GUI(window)
     window.mainloop()

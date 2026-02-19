@@ -1,4 +1,20 @@
 .idea
-stockfish
 __pycache__
 venv
+
+# Ignore Stockfish binaries but keep the directory structure and metadata
+engines/stockfish/**/stockfish.exe
+engines/stockfish/**/stockfish
+engines/stockfish/**/*.zip
+engines/stockfish/**/*.tar.gz
+engines/stockfish/**/*.tar
+# Keep .gitkeep, version.json, README.md, LICENSE
+!engines/stockfish/**/.gitkeep
+!engines/stockfish/**/version.json
+!engines/stockfish/**/README.md
+!engines/stockfish/**/LICENSE
+
+# PyInstaller build output
+build/
+dist/
+*.spec.bak

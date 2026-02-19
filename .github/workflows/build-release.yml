@@ -1,0 +1,191 @@
+name: Build & Release
+
+# Triggers on any tag like v1.0.0-beta.1, v0.9.0, etc.
+# Also allows manual dispatch from the Actions UI.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to use (e.g. v1.0.0-beta.1)"
+        required: true
+        default: "v1.0.0-beta.1"
+
+permissions:
+  contents: write # needed to create/upload releases
+
+# ---------------------------------------------------------------------------
+jobs:
+  # ---------------------------------------------------------------------------
+
+  # ── Build on each platform ────────────────────────────────────────────────
+  build:
+    name: Build  [${{ matrix.os }}]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false # let all platforms finish even if one fails
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: PawnBit-windows.exe
+            dist_name: PawnBit.exe
+
+          - os: macos-latest
+            artifact: PawnBit-macos
+            dist_name: PawnBit
+
+          - os: ubuntu-latest
+            artifact: PawnBit-linux
+            dist_name: PawnBit
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      # ── 2. Python setup ──────────────────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      # ── 3. Platform-specific system dependencies ─────────────────────────
+      - name: Install system deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            python3-tk \
+            python3-dev \
+            libxcb-xinerama0 \
+            libxkbcommon-x11-0 \
+            xvfb \
+            scrot \
+            libgirepository1.0-dev
+
+      - name: Install system deps (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install python-tk@3.11 || true
+
+      # ── 4. Python dependencies ───────────────────────────────────────────
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install pyinstaller>=6.0
+          pip install -r requirements.txt
+
+      # ── 5. Build executable ──────────────────────────────────────────────
+      - name: Build with PyInstaller (Windows)
+        if: runner.os == 'Windows'
+        run: pyinstaller PawnBit.spec
+
+      - name: Build with PyInstaller (macOS / Linux)
+        if: runner.os != 'Windows'
+        run: pyinstaller PawnBit.spec
+
+      # ── 6. Rename output to platform-specific artifact name ──────────────
+      - name: Rename artifact
+        shell: bash
+        run: mv "dist/${{ matrix.dist_name }}" "dist/${{ matrix.artifact }}"
+
+      # ── 7. Upload artifact to be consumed by the release job ─────────────
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}
+          if-no-files-found: error
+
+  # ── Create GitHub Release ─────────────────────────────────────────────────
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Download all platform artifacts into one folder ────────────────
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      # ── 2. Determine the tag / version string ─────────────────────────────
+      - name: Set version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          fi
+
+      # ── 3. Publish pre-release ────────────────────────────────────────────
+      - name: Create pre-release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: "PawnBit ${{ steps.version.outputs.tag }} (Beta)"
+          prerelease: true
+          draft: false
+          body: |
+            ## 🎮 PawnBit ${{ steps.version.outputs.tag }} — Beta
+
+            > ⚠️ **This is a pre-release / beta build.** Expect rough edges.
+            > Please report issues here: [GitHub Issues](../../issues)
+
+            ---
+
+            ### 📥 Downloads
+
+            | Platform | File | Notes |
+            |----------|------|-------|
+            | 🪟 **Windows** | `PawnBit-windows.exe` | Double-click to run |
+            | 🍎 **macOS** | `PawnBit-macos` | See instructions below |
+            | 🐧 **Linux** | `PawnBit-linux` | See instructions below |
+            | 📦 **Source** | `Source code (zip / tar.gz)` | Run via `run.bat` or `python src/gui.py` |
+
+            ---
+
+            ### 🚀 Getting started
+
+            **Windows**
+            1. Download `PawnBit-windows.exe`
+            2. Run it — Stockfish is downloaded automatically on first launch
+
+            **macOS / Linux**
+            ```bash
+            chmod +x PawnBit-macos   # or PawnBit-linux
+            ./PawnBit-macos
+            ```
+            > macOS may prompt for Accessibility permissions (needed for pyautogui).
+
+            **Source code**
+            ```bash
+            python -m venv venv
+            # Windows:
+            venv\Scripts\pip install -r requirements.txt
+            venv\Scripts\python src\gui.py
+            # macOS / Linux:
+            venv/bin/pip3 install -r requirements.txt
+            venv/bin/python3 src/gui.py
+            ```
+
+            ---
+
+            ### ✨ What's new
+            - Stockfish auto-download & version management
+            - Human-like random move delay
+            - Non-stop mode & puzzle mode for both Chess.com and Lichess
+            - Mouseless mode for Chess.com (JS injection)
+            - Engine status panel (version, build type, architecture)
+            - Full English UI
+
+          files: |
+            release-assets/PawnBit-windows.exe
+            release-assets/PawnBit-macos
+            release-assets/PawnBit-linux
