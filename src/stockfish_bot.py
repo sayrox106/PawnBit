@@ -143,6 +143,15 @@ class StockfishBot(multiprocess.Process):
     # ------------------------------------------------------------------
 
     def run(self):  # sourcery skip: extract-duplicate-method, switch, use-fstring-for-concatenation
+        # ── HIDE CONSOLE WINDOW ───────────────────────────────────
+        if platform.system() == "Windows":
+            import subprocess
+            original_popen = subprocess.Popen
+            def silent_popen(*args, **kwargs):
+                kwargs['creationflags'] = kwargs.get('creationflags', 0) | 0x08000000
+                return original_popen(*args, **kwargs)
+            subprocess.Popen = silent_popen
+
         if self.website == "chesscom":
             self.grabber = ChesscomGrabber(self.chrome_url, self.chrome_session_id)
         else:
@@ -227,6 +236,14 @@ class StockfishBot(multiprocess.Process):
                 self._send("M_MOVE" + ",".join(move_list))
 
             while True:
+                # ── Check for STOP from GUI ────────────────────────────
+                if self.pipe.poll():
+                    try:
+                        if self.pipe.recv() == "STOP":
+                            break
+                    except EOFError:
+                        break
+
                 # ── Bot's turn ─────────────────────────────────────────
                 if (self.is_white and board.turn == chess.WHITE) or (
                     not self.is_white and board.turn == chess.BLACK
@@ -406,9 +423,18 @@ class StockfishBot(multiprocess.Process):
 
         except Exception as e:
             print(e)
-            exc_type, exc_obj, exc_tb = sys.exc_info()
-            fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
-            print(exc_type, fname, exc_tb.tb_lineno)
+            # exc_type, exc_obj, exc_tb = sys.exc_info()
+            # fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
+            # print(exc_type, fname, exc_tb.tb_lineno)
+        finally:
+            # ── CLEANUP ───────────────────────────────────────────────
+            try:
+                # Explicitly delete stockfish to close the process
+                if 'stockfish' in locals():
+                    del stockfish
+            except Exception:
+                pass
+            self._send("STOPPED")
 
     # ------------------------------------------------------------------
     # Evaluation helpers

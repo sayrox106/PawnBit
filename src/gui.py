@@ -17,11 +17,28 @@ import os
 import sys
 import threading
 import time
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
-from pathlib import Path
-
+import platform
 import multiprocess
+
+# ── DPI AWARENESS (Windows) ───────────────────────────────
+if sys.platform == "win32":
+    try:
+        from ctypes import windll
+        windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        pass
+
+# ── HIDE CONSOLE WINDOW ───────────────────────────────────
+if sys.platform == "win32":
+    import subprocess
+    _original_popen = subprocess.Popen
+    def _silent_popen(*args, **kwargs):
+        kwargs['creationflags'] = kwargs.get('creationflags', 0) | 0x08000000
+        return _original_popen(*args, **kwargs)
+    subprocess.Popen = _silent_popen
+
+if getattr(sys, 'frozen', False):
+    multiprocess.set_executable(sys.executable)
 
 # Allow running from project root or src/
 _SRC_DIR = Path(__file__).resolve().parent
@@ -30,13 +47,27 @@ if str(_SRC_DIR) not in sys.path:
 
 # Asset directory: when frozen by PyInstaller assets land in sys._MEIPASS/assets
 if getattr(sys, 'frozen', False):
+    _BASE_DIR = Path(sys.executable).resolve().parent
     _ASSET_DIR = Path(sys._MEIPASS) / "assets"
 else:
+    _BASE_DIR = Path(__file__).resolve().parent.parent
     _ASSET_DIR = _SRC_DIR / "assets"
 
 from overlay import run as run_overlay
 from stockfish_bot import StockfishBot
 import engine_manager
+
+# ── HIDE CONSOLE WINDOW ───────────────────────────────────
+if sys.platform == "win32":
+    import subprocess
+    _original_popen = subprocess.Popen
+    def _silent_popen(*args, **kwargs):
+        kwargs['creationflags'] = kwargs.get('creationflags', 0) | 0x08000000
+        return _original_popen(*args, **kwargs)
+    subprocess.Popen = _silent_popen
+
+if getattr(sys, 'frozen', False):
+    multiprocess.set_executable(sys.executable)
 
 try:
     from selenium import webdriver
@@ -51,6 +82,20 @@ try:
     _KEYBOARD_AVAILABLE = True
 except ImportError:
     _KEYBOARD_AVAILABLE = False
+
+def log_error(msg):
+    """Write error to a log file for debugging frozen exe crashes."""
+    try:
+        log_path = Path(_BASE_DIR) / "error_log.txt"
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"[{time.ctime()}] {msg}\n")
+    except Exception:
+        pass
+
+# Redirect stdout/stderr to file if frozen
+if getattr(sys, 'frozen', False):
+    sys.stdout = open(Path(_BASE_DIR) / "output_log.txt", "a", encoding="utf-8")
+    sys.stderr = open(Path(_BASE_DIR) / "error_log.txt", "a", encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -327,16 +372,18 @@ class GUI:
         self.master = master
 
         # State
+        self.match_moves        = []
         self.exit               = False
+        
+        # Track active resources
         self.chrome             = None
         self.chrome_url         = None
         self.chrome_session_id  = None
-        self.stockfish_bot_pipe    = None
-        self.overlay_screen_pipe   = None
+        self.stockfish_bot_pipe = None
         self.stockfish_bot_process = None
         self.overlay_screen_process = None
+        self.overlay_queue      = None
         self.restart_after_stopping = False
-        self.match_moves        = []
 
         # Engine path (resolved after detection)
         self.stockfish_path     = ""
@@ -784,8 +831,9 @@ class GUI:
         try:
             import subprocess as _sp
             proc = _sp.Popen(
-                [abs_path], stdin=_sp.PIPE, stdout=_sp.PIPE, stderr=_sp.PIPE, text=True
-            )
+                [abs_path], stdin=_sp.PIPE, stdout=_sp.PIPE, stderr=_sp.PIPE, text=True,
+                creationflags=0x08000000 if platform.system() == "Windows" else 0
+            ) # CREATE_NO_WINDOW
             proc.stdin.write("uci\n")
             proc.stdin.flush()
             out = ""
@@ -871,10 +919,30 @@ class GUI:
     # ------------------------------------------------------------------
 
     def on_close_listener(self):
+        """Called when the user clicks the X button."""
         self.exit = True
-        self.on_stop_button_listener()  # Kill child processes
-        self.master.destroy()
-        sys.exit(0)
+        self._cleanup_resources()
+        try:
+            self.master.destroy()
+        except Exception:
+            pass
+        # Hard exit to ensure all OS threads/processes are reclaimed
+        os._exit(0)
+
+    def _cleanup_resources(self):
+        """Stop all background processes and close the browser."""
+        # 1. Stop the bot and overlay
+        self.on_stop_button_listener()
+
+        # 2. Close the browser
+        if self.chrome:
+            try:
+                self.chrome.quit()
+            except Exception:
+                pass
+            self.chrome = None
+            self.opened_browser = False
+            self.opening_browser = False
 
     # ------------------------------------------------------------------
     # Background threads
@@ -972,10 +1040,14 @@ class GUI:
             if not self.opened_browser:
                 continue
             if _KEYBOARD_AVAILABLE:
-                if kb.is_pressed("1"):
-                    self.on_start_button_listener()
-                elif kb.is_pressed("2"):
-                    self.on_stop_button_listener()
+                try:
+                    if kb.is_pressed("1"):
+                        self.on_start_button_listener()
+                    elif kb.is_pressed("2"):
+                        self.on_stop_button_listener()
+                except Exception:
+                    # Keyboard hook might fail without admin rights or in certain envs
+                    pass
 
     # ------------------------------------------------------------------
     # Button listeners
@@ -998,7 +1070,10 @@ class GUI:
             chrome_install = ChromeDriverManager().install()
             folder = os.path.dirname(chrome_install)
             chromedriver_path = os.path.join(folder, "chromedriver.exe")
+            from selenium.webdriver.chrome.service import Service as ChromeService
             service = ChromeService(chromedriver_path)
+            if sys.platform == "win32":
+                service.creationflags = 0x08000000
             self.chrome = webdriver.Chrome(service=service, options=options)
         except WebDriverException:
             self._reset_browser_button()
@@ -1084,6 +1159,7 @@ class GUI:
         parent_conn, child_conn = multiprocess.Pipe()
         self.stockfish_bot_pipe = parent_conn
         st_ov_queue = multiprocess.Queue()
+        self.overlay_queue = st_ov_queue # Store for cleanup
 
         self.stockfish_bot_process = StockfishBot(
             self.chrome_url,
@@ -1120,11 +1196,36 @@ class GUI:
 
     def on_stop_button_listener(self):
         if self.stockfish_bot_process is not None:
+            # 1. Try graceful stop
+            try:
+                if self.stockfish_bot_pipe:
+                    self.stockfish_bot_pipe.send("STOP")
+            except Exception:
+                pass
+            
+            # 2. Tell overlay to stop
+            try:
+                # We need a reference to the queue we passed to overlay
+                # I'll store it as self.overlay_queue
+                if hasattr(self, 'overlay_queue') and self.overlay_queue:
+                    self.overlay_queue.put("STOP")
+            except Exception:
+                pass
+
             if self.overlay_screen_process is not None:
-                self.overlay_screen_process.kill()
+                try:
+                    self.overlay_screen_process.terminate()
+                    self.overlay_screen_process.join(timeout=0.5)
+                    if self.overlay_screen_process.is_alive():
+                        self.overlay_screen_process.kill()
+                except Exception:
+                    pass
                 self.overlay_screen_process = None
+
             if self.stockfish_bot_process.is_alive():
-                self.stockfish_bot_process.kill()
+                self.stockfish_bot_process.join(timeout=1.0)
+                if self.stockfish_bot_process.is_alive():
+                    self.stockfish_bot_process.kill()
             self.stockfish_bot_process = None
 
         if self.stockfish_bot_pipe is not None:
@@ -1260,6 +1361,20 @@ class GUI:
 
 if __name__ == "__main__":
     multiprocess.freeze_support()
+    
+    # Global exception handler for the GUI
+    def handle_exception(exc_type, exc_value, exc_traceback):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc_value, exc_traceback)
+            return
+        err_msg = f"Uncaught exception: {exc_type.__name__}: {exc_value}"
+        log_error(err_msg)
+        # Also print to stderr if not frozen
+        if not getattr(sys, 'frozen', False):
+            sys.__excepthook__(exc_type, exc_value, exc_traceback)
+
+    sys.excepthook = handle_exception
+
     window = tk.Tk()
     my_gui = GUI(window)
     window.mainloop()

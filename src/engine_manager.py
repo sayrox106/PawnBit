@@ -173,7 +173,8 @@ def detect_cpu_features() -> Dict[str, bool]:
             result = subprocess.run(
                 ["powershell", "-NoProfile", "-Command",
                  "[System.Runtime.Intrinsics.X86.Avx2]::IsSupported"],
-                capture_output=True, text=True, timeout=3
+                capture_output=True, text=True, timeout=3,
+                creationflags=0x08000000 if platform.system() == "Windows" else 0
             )
             if "True" in result.stdout:
                 features["avx2"] = True
@@ -265,7 +266,7 @@ def validate_engine(path: str, timeout: float = _SPAWN_TIMEOUT) -> bool:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            creationflags=subprocess.CREATE_NO_WINDOW if platform.system() == "Windows" else 0,
+            creationflags=0x08000000 if platform.system() == "Windows" else 0,
         )
         try:
             proc.stdin.write("uci\n")

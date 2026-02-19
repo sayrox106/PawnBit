@@ -56,7 +56,19 @@ class OverlayScreen(QWidget):
         """
 
         while True:
-            message = self.stockfish_queue.get()
+            try:
+                # Add timeout so the thread can check if it should exit
+                message = self.stockfish_queue.get(timeout=1.0)
+            except Exception:
+                # If the main process dies, the queue might become invalid
+                if not self.isVisible():
+                    break
+                continue
+
+            if message == "STOP":
+                QApplication.quit()
+                break
+
             if isinstance(message, list):
                 # Arrow data
                 self.set_arrows(message)

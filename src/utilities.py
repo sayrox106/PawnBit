@@ -23,7 +23,10 @@ def attach_to_session(executor_url, session_id):
 
     # Patch the function before creating the driver object
     WebDriver.execute = new_command_execute
-    driver = webdriver.Remote(command_executor=executor_url, desired_capabilities={})
+    
+    options = webdriver.ChromeOptions()
+    # Using options instead of deprecated desired_capabilities
+    driver = webdriver.Remote(command_executor=executor_url, options=options)
     driver.session_id = session_id
 
     # Replace the patched function with original function

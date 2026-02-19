@@ -123,7 +123,7 @@ exe = EXE(
     runtime_tmpdir=None,
     # Keep console=True for beta builds so errors are visible.
     # Set to False for a silent final release.
-    console=True,
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
