@@ -10,7 +10,7 @@
 import sys
 import os
 import platform
-from pathlib import Path
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 block_cipher = None
 _CUR_DIR = os.path.abspath(os.getcwd())
@@ -24,6 +24,8 @@ datas = [
     # Grabber package (needed for dynamic import resolution inside frozen exe)
     ('src/grabbers', 'grabbers'),
 ]
+# Collect everything from selenium to ensure selenium-manager binaries are included
+datas += collect_data_files('selenium')
 
 hidden_imports = [
     # Core

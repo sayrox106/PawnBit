@@ -1088,8 +1088,32 @@ class GUI:
 
             if sys.platform == "win32":
                 service.creationflags = 0x08000000
+                
+                # Help Selenium Manager find Chrome by adding common paths to PATH
+                chrome_dirs = [
+                    r"C:\Program Files\Google\Chrome\Application",
+                    r"C:\Program Files (x86)\Google\Chrome\Application",
+                    os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application"),
+                ]
+                path_parts = os.environ.get("PATH", "").split(os.pathsep)
+                for d in chrome_dirs:
+                    if os.path.isdir(d) and d not in path_parts:
+                        path_parts.append(d)
+                os.environ["PATH"] = os.pathsep.join(path_parts)
             
-            self.chrome = webdriver.Chrome(service=service, options=options)
+            try:
+                self.chrome = webdriver.Chrome(service=service, options=options)
+            except WebDriverException as e:
+                # If it fails, try one more time without the hidden console flag just in case
+                if "Selenium Manager" in str(e) or "chromedriver" in str(e):
+                    log_error(f"First Chrome launch failed: {e}")
+                    try:
+                        service = ChromeService() # fresh service
+                        self.chrome = webdriver.Chrome(service=service, options=options)
+                    except Exception as e2:
+                        raise e2
+                else:
+                    raise e
             
             # Navigation
             if self.website.get() == "chesscom":
@@ -1104,11 +1128,16 @@ class GUI:
             self.master.after(0, self._on_browser_success)
 
         except WebDriverException as e:
-            log_error(f"WebDriverException: {e}")
-            self.master.after(0, lambda: self._on_browser_failed("Could not find or launch Chrome. Please ensure Google Chrome is installed."))
+            err_msg = str(e)
+            log_error(f"WebDriverException: {err_msg}")
+            tip = ""
+            if "Selenium Manager" in err_msg or "chromedriver" in err_msg:
+                tip = "\n\nTip: Could not obtain ChromeDriver. Ensure Chrome is installed and you have internet access for the first launch."
+            self.master.after(0, lambda m=err_msg, t=tip: self._on_browser_failed(f"WebDriver Error:\n\n{m}{t}"))
         except Exception as e:
-            log_error(f"Browser open exception: {e}")
-            self.master.after(0, lambda: self._on_browser_failed(f"An error occurred: {e}"))
+            err_msg = str(e)
+            log_error(f"Browser open exception: {err_msg}")
+            self.master.after(0, lambda m=err_msg: self._on_browser_failed(f"An unexpected error occurred:\n\n{m}"))
 
     def _on_browser_success(self):
         self.opening_browser = False
