@@ -11,7 +11,7 @@ on:
       tag:
         description: "Release tag to use (e.g. v1.0.0-beta.1)"
         required: true
-        default: "v1.0.0-beta.1"
+        default: "v1.0.0-beta.3"
 
 permissions:
   contents: write # needed to create/upload releases
@@ -261,11 +261,12 @@ jobs:
 
             ---
 
-            ### ✨ What's new in v1.0.0-beta.2
-            - **Bundled Engine**: Stockfish 18 is now bundled again for instant startup.
-            - **Stability Fixes**: Transitioned to Threading and Tkinter-based overlay (no more PyQt6).
-            - **DLL Load Fix**: Optimized build flags and added a ZIP variant to prevent 'Failed to load Python DLL' errors.
-            - **Grabber Optimization**: Added 1s sleep in board detection to save CPU and allowed interruptible searches.
+            ### ✨ What's new in v1.0.0-beta.3
+            - **Ghost Human Mode**: Advanced mouseless injection that simulates realistic mouse movements and jitter (Enable "Human-like Random Delay").
+            - **Settings Management**: Added Auto-Save and Config Import/Export buttons (Check the bottom right!).
+            - **Performance Calibration**: Reduced CPU overhead for board detection and synchronized engine evaluation.
+            - **Lichess Logic Overhaul**: Improved color detection and move synchronization for anonym/guest modes.
+            - **Clean Console**: Removed redundant "Syncing" messages for a better terminal experience.
 
           files: |
             release-assets/PawnBit-windows.exe

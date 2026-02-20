@@ -663,6 +663,21 @@ class GUI:
         if _KEYBOARD_AVAILABLE:
             threading.Thread(target=self.keypress_listener_thread, daemon=True).start()
 
+        # ── Setup Auto-Save Traces ────────────────────────────────────────
+        # Bind every setting variable to the auto-save helper
+        for var in [self.website, self.enable_manual_mode, self.enable_mouseless_mode,
+                    self.enable_non_stop_puzzles, self.enable_non_stop_matches,
+                    self.enable_bongcloud, self.mouse_latency, self.random_delay_enabled,
+                    self.random_delay_min, self.slow_mover, self.skill_level,
+                    self.stockfish_depth, self.memory, self.cpu_threads, self.enable_topmost]:
+            var.trace_add("write", self._on_setting_changed)
+
+        # ── Config Export/Import Buttons ──────────────────────────────────
+        config_frame = tk.Frame(right_frame)
+        tk.Button(config_frame, text="📥 Import Config", command=self.on_import_config_button_listener).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Button(config_frame, text="📤 Export Config", command=self.on_export_config_button_listener).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        config_frame.pack(anchor=tk.NW, fill=tk.X)
+
         # ── Engine detection on startup (non-blocking) ───────────────────
         self._load_settings()
         threading.Thread(target=self._startup_engine_check, daemon=True).start()
@@ -678,16 +693,20 @@ class GUI:
         else:
             self._random_delay_frame.pack_forget()
 
+    def _on_setting_changed(self, *args):
+        """Called whenever a bound setting variable changes."""
+        self._save_settings()
+
     def _save_settings(self):
         """Persist UI settings to config.json."""
         try:
             cfg = engine_manager.get_config()
             cfg["website"]              = self.website.get()
-            cfg["manual_mode"]          = self.enable_manual_mode.get()
-            cfg["mouseless_mode"]       = self.enable_mouseless_mode.get()
-            cfg["non_stop_puzzles"]      = self.enable_non_stop_puzzles.get()
-            cfg["non_stop_matches"]      = self.enable_non_stop_matches.get()
-            cfg["bongcloud"]            = self.enable_bongcloud.get()
+            cfg["manual_mode"]          = bool(self.enable_manual_mode.get())
+            cfg["mouseless_mode"]       = bool(self.enable_mouseless_mode.get())
+            cfg["non_stop_puzzles"]      = bool(self.enable_non_stop_puzzles.get())
+            cfg["non_stop_matches"]      = bool(self.enable_non_stop_matches.get())
+            cfg["bongcloud"]            = bool(self.enable_bongcloud.get())
             cfg["mouse_latency"]        = self.mouse_latency.get()
             cfg["random_delay_enabled"] = bool(self.random_delay_enabled.get())
             cfg["random_delay_min"]     = self.random_delay_min.get()
@@ -696,7 +715,7 @@ class GUI:
             cfg["depth"]                = self.stockfish_depth.get()
             cfg["memory"]               = self.memory.get()
             cfg["cpu_threads"]          = self.cpu_threads.get()
-            cfg["topmost"]              = self.enable_topmost.get()
+            cfg["topmost"]              = bool(self.enable_topmost.get())
             engine_manager.save_config(cfg)
         except Exception:
             pass
@@ -704,6 +723,7 @@ class GUI:
     def _load_settings(self):
         """Load UI settings from config.json on startup."""
         cfg = engine_manager.get_config()
+        # Loading triggers traces but that's fine, it will just re-save the exact same values.
         if "website" in cfg:              self.website.set(cfg["website"])
         if "manual_mode" in cfg:          self.enable_manual_mode.set(cfg["manual_mode"])
         if "mouseless_mode" in cfg:       self.enable_mouseless_mode.set(cfg["mouseless_mode"])
@@ -718,13 +738,38 @@ class GUI:
         if "depth" in cfg:                self.stockfish_depth.set(cfg["depth"])
         if "memory" in cfg:               self.memory.set(cfg["memory"])
         if "cpu_threads" in cfg:          self.cpu_threads.set(cfg["cpu_threads"])
-        if "topmost" in cfg:
-            self.enable_topmost.set(cfg["topmost"])
-            self.on_topmost_check_button_listener()
+        if "topmost" in cfg:              self.enable_topmost.set(cfg["topmost"])
 
-        # Refresh dependent UI visibility
+        # Manual refreshes for dependent UI logic
+        self.on_topmost_check_button_listener()
         self.on_manual_mode_checkbox_listener()
         self._on_random_delay_toggle()
+
+    def on_export_config_button_listener(self):
+        f = filedialog.asksaveasfile(
+            initialfile="pawnbit_config.json",
+            defaultextension=".json",
+            filetypes=[("JSON Files", "*.json"), ("All Files", "*.*")],
+        )
+        if f is None: return
+        cfg = engine_manager.get_config()
+        json.dump(cfg, f, indent=2)
+        f.close()
+        messagebox.showinfo("Config Export", "Configuration exported successfully.")
+
+    def on_import_config_button_listener(self):
+        path = filedialog.askopenfilename(
+            filetypes=[("JSON Files", "*.json"), ("All Files", "*.*")]
+        )
+        if not path: return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                new_cfg = json.load(f)
+            engine_manager.save_config(new_cfg)
+            self._load_settings()
+            messagebox.showinfo("Config Import", "Configuration imported successfully.")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to import config: {e}")
 
     def _add_separator(self, parent, text, padx=40):
         f = tk.Frame(parent)
@@ -744,7 +789,12 @@ class GUI:
         result = engine_manager.ensure_engine(timeout=5.0)
 
         if result and result.get("valid"):
-            self.stockfish_path = result["binary_path"]
+            # Ensure path is absolute
+            bp = result["binary_path"]
+            if bp and not os.path.isabs(bp):
+                from pathlib import Path as _P
+                bp = str(_P(engine_manager._BASE_DIR) / bp)
+            self.stockfish_path = bp
             self._engine_status = result
             self.master.after(0, self._on_engine_found, result)
             # Async update check (fire-and-forget)
@@ -1025,7 +1075,10 @@ class GUI:
                     elif data == "STOPPED":
                         self.on_stop_button_listener()
                     elif data[:7] == "ERR_EXE":
-                        messagebox.showerror("Error", "Stockfish path provided is not valid!")
+                        err_msg = "Stockfish failed to initialize."
+                        if ":" in data:
+                            err_msg += f"\n\nDetails: {data.split(':', 1)[1]}"
+                        messagebox.showerror("Stockfish Error", err_msg)
                     elif data[:8] == "ERR_PERM":
                         messagebox.showerror("Error", "Stockfish path provided is not executable!")
                     elif data[:9] == "ERR_BOARD":
@@ -1096,6 +1149,19 @@ class GUI:
                     if "webdriver" in key.lower() or "chromedriver" in key.lower():
                         del os.environ[key]
 
+                # Clear PATH of any directory containing chromedriver.exe to prevent discovery of old drivers
+                path_parts = os.environ.get("PATH", "").split(os.pathsep)
+                new_path_parts = []
+                for part in path_parts:
+                    if os.path.isdir(part):
+                        try:
+                            if any("chromedriver" in f.lower() for f in os.listdir(part)):
+                                continue # Skip this directory
+                        except Exception:
+                            pass
+                    new_path_parts.append(part)
+                os.environ["PATH"] = os.pathsep.join(new_path_parts)
+
                 # Create a local, clean cache directory for drivers to avoid conflicts with global ones
                 local_cache = os.path.join(os.path.expandvars("%LOCALAPPDATA%"), "PawnBitDrivers")
                 os.makedirs(local_cache, exist_ok=True)
@@ -1122,19 +1188,33 @@ class GUI:
                     log_error("Chrome executable not found in standard locations.")
             
             try:
-                # We do NOT pass a path to service. Selenium 4.6+ will use Selenium Manager 
-                # (bundled within selenium package) to find/download the matching driver.
+                # Force Selenium Manager to resolve the driver path explicitly.
+                # This bypasses issues where Selenium might pick up an old chromedriver from PATH.
+                from selenium.webdriver.common.selenium_manager import SeleniumManager
+                try:
+                    sm = SeleniumManager()
+                    # Resolve driver based on our configured options (which has the Chrome binary path)
+                    driver_path = sm.driver_location(options)
+                    if driver_path:
+                        log_error(f"Selenium Manager resolved driver to: {driver_path}")
+                        service.executable_path = driver_path
+                except Exception as sm_err:
+                    log_error(f"Selenium Manager explicit call failed: {sm_err}")
+
                 self.chrome = webdriver.Chrome(service=service, options=options)
             except WebDriverException as e:
                 err_str = str(e)
-                log_error(f"First Chrome launch failed: {err_str}")
-                # Fallback: if there's a driver in the current directory or nearby, 
-                # Selenium might be confused. We try one more time.
-                try:
-                    service = ChromeService()
-                    self.chrome = webdriver.Chrome(service=service, options=options)
-                except Exception as e2:
-                    raise e2
+                log_error(f"Chrome launch failed: {err_str}")
+                
+                # If it's the 'session not created' error, we provide a clearer hint
+                if "session not created" in err_str:
+                    tip = ("\n\nTip: An outdated 'chromedriver.exe' was found. "
+                           "The app tried to bypass it, but it's still being blocked. "
+                           "Try searching for and deleting any 'chromedriver.exe' files on your PC.")
+                    self.master.after(0, lambda m=err_str, t=tip: self._on_browser_failed(f"Driver Conflict:\n\n{m}{t}"))
+                    return
+                
+                raise e
             
             # Navigation
             if self.website.get() == "chesscom":
@@ -1261,14 +1341,19 @@ class GUI:
         self.start_button.update()
 
     def on_stop_button_listener(self):
-        if self.stockfish_bot_thread is not None:
-            # 1. Try graceful stop
+        # Prevent crash if stop is called while thread is being cleaned up
+        bt = self.stockfish_bot_thread
+        if bt is not None:
+            # 1. Clear reference immediately to prevent other threads from entering
+            self.stockfish_bot_thread = None
+            
+            # 2. Try graceful stop
             try:
                 self.gui_to_bot_queue.put("STOP")
             except Exception:
                 pass
             
-            # 2. Tell overlay to stop
+            # 3. Tell overlay to stop
             try:
                 if self.overlay_queue:
                     self.overlay_queue.put("STOP")
@@ -1278,11 +1363,9 @@ class GUI:
             except Exception:
                 pass
 
-            if self.stockfish_bot_thread.is_alive():
+            if bt.is_alive():
                 # For threads, we just wait. The bot loop checks the queue.
-                self.stockfish_bot_thread.join(timeout=1.0)
-            
-            self.stockfish_bot_thread = None
+                bt.join(timeout=1.0)
 
         self.running = False
         self.status_text["text"] = "Inactive"

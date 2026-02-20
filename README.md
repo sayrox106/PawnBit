@@ -30,8 +30,12 @@ _Note: The mouse is moved by Python in standard mode._
   - Material advantage tracking.
   - Accuracy estimation for you and your opponent.
 - **Customizable Engine**: Control Depth, Skill Level, Memory (Hash), and CPU Threads.
-- **Settings Persistence**: Your configuration is automatically saved and loaded.
 - **Improved Stability**: Threaded browser launching and robust error handling for frozen executables.
+- **Advanced Mouseless Mode**: High-performance JS injection for Lichess and Chess.com, ensuring background play without moving your hardware mouse.
+- **Ghost Human Simulation**: (New) Simulates realistic mouse movements during injection when "Human-like Random Delay" is enabled, making it virtually undetectable.
+- **Settings Management**:
+  - **Auto-Save**: Remembers every checkbox and slider change for the next session.
+  - **Import/Export**: Easily save and load different bot configurations via JSON files.
 
 ## 📥 Installation
 

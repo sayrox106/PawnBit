@@ -8,28 +8,28 @@ def char_to_num(char):
     return ord(char) - ord("a") + 1
 
 
-# Attaches to a running webdriver
-# Returns the webdriver
-# Taken from https://stackoverflow.com/a/48194907/5868441
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options as ChromeOptions
+from selenium.webdriver.remote.webdriver import WebDriver as RemoteWebDriver
+
+# ── ATTACH TO SESSION (Selenium 4) ─────────────────────────
+class ReusableWebDriver(RemoteWebDriver):
+    """
+    Subclass that bypasses start_session to attach to an existing
+    browser instance using its executor_url and session_id.
+    """
+    def start_session(self, capabilities, browser_profile=None):
+        # Do nothing - we already have a session
+        pass
+
 def attach_to_session(executor_url, session_id):
-    original_execute = WebDriver.execute
-
-    def new_command_execute(self, command, params=None):
-        if command == "newSession":
-            # Mock the response
-            return {'success': 0, 'value': None, 'sessionId': session_id}
-        else:
-            return original_execute(self, command, params)
-
-    # Patch the function before creating the driver object
-    WebDriver.execute = new_command_execute
-    
-    options = webdriver.ChromeOptions()
-    # Using options instead of deprecated desired_capabilities
-    driver = webdriver.Remote(command_executor=executor_url, options=options)
+    """
+    Attaches to a running browser session.
+    Returns the WebDriver instance.
+    """
+    options = ChromeOptions()
+    # Simply instantiate our subclass with the known executor,
+    # options, and manually assign the session_id.
+    driver = ReusableWebDriver(command_executor=executor_url, options=options)
     driver.session_id = session_id
-
-    # Replace the patched function with original function
-    WebDriver.execute = original_execute
-
     return driver

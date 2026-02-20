@@ -1,4 +1,19 @@
 {
-  "stockfish_path": "",
-  "stockfish_version": ""
+  "stockfish_path": "engines/stockfish/stockfish-18/stockfish/stockfish-windows-x86-64-sse41-popcnt.exe",
+  "stockfish_version": "18",
+  "website": "lichess",
+  "manual_mode": false,
+  "mouseless_mode": true,
+  "non_stop_puzzles": 0,
+  "non_stop_matches": 0,
+  "bongcloud": 0,
+  "mouse_latency": 0.0,
+  "random_delay_enabled": false,
+  "random_delay_min": 0.0,
+  "slow_mover": 100,
+  "skill_level": 20,
+  "depth": 15,
+  "memory": 512,
+  "cpu_threads": 1,
+  "topmost": 1
 }

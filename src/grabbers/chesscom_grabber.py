@@ -1,4 +1,5 @@
-from selenium.common import NoSuchElementException, StaleElementReferenceException
+import time
+from selenium.common import NoSuchElementException, StaleElementReferenceException, WebDriverException
 from selenium.webdriver.common.by import By
 
 from grabbers.grabber import Grabber
@@ -14,9 +15,6 @@ class ChesscomGrabber(Grabber):
 
     def update_board_elem(self, stop_queue=None):
         """Keep looking for the board element until found, browser closed, or STOP signal."""
-        import time
-        from selenium.common.exceptions import WebDriverException
-        
         while True:
             # Check for STOP signal from GUI
             if stop_queue and not stop_queue.empty():
@@ -58,53 +56,27 @@ class ChesscomGrabber(Grabber):
     # ------------------------------------------------------------------
 
     def is_white(self):
-        square_names = None
+        if not self._board_elem:
+            return None
         try:
-            coordinates = self.chrome.find_element(
-                By.XPATH, "//*[@id='board-play-computer']//*[name()='svg']"
-            )
-            square_names = coordinates.find_elements(By.XPATH, ".//*")
-        except NoSuchElementException:
-            try:
-                coordinates = self.chrome.find_elements(
-                    By.XPATH, "//*[@id='board-single']//*[name()='svg']"
-                )
-                coordinates = [
-                    x for x in coordinates
-                    if x.get_attribute("class") == "coordinates"
-                ][0]
-                square_names = coordinates.find_elements(By.XPATH, ".//*")
-            except (NoSuchElementException, IndexError):
-                try:
-                    # Puzzle board
-                    coordinates = self.chrome.find_element(
-                        By.XPATH, "//*[@id='board-puzzle']//*[name()='svg']"
-                    )
-                    square_names = coordinates.find_elements(By.XPATH, ".//*")
-                except NoSuchElementException:
-                    return None
-
-        if not square_names:
-            return None
-
-        # Find bottom-left square (min x, max y)
-        elem = None
-        min_x = None
-        max_y = None
-        for name_element in square_names:
-            try:
-                x = float(name_element.get_attribute("x"))
-                y = float(name_element.get_attribute("y"))
-            except (TypeError, ValueError):
-                continue
-            if min_x is None or (x <= min_x and y >= max_y):
-                min_x = x
-                max_y = y
-                elem = name_element
-
-        if elem is None:
-            return None
-        return elem.text == "1"
+            # 1. Check 'flipped' class
+            cls = self._board_elem.get_attribute("class") or ""
+            if "flipped" in cls:
+                return False
+            
+            # 2. SVG Fallback
+            svgs = self._board_elem.find_elements(By.TAG_NAME, "svg")
+            for svg in svgs:
+                if svg.get_attribute("class") == "coordinates":
+                    try:
+                        one = svg.find_element(By.XPATH, ".//*[text()='1']")
+                        y = float(one.get_attribute("y") or 0)
+                        return y > 50
+                    except Exception:
+                        continue
+            return True
+        except Exception:
+            return True
 
     # ------------------------------------------------------------------
     # Game-over detection
@@ -281,44 +253,63 @@ class ChesscomGrabber(Grabber):
         to_sq   = move[2:4]   # e.g. "e4"
         promo   = move[4] if len(move) == 5 else ""
 
+        from selenium.webdriver.common.action_chains import ActionChains
+        
+        # 1. Primary Method: Selenium ActionChains (Safe "Ghost Mouse" - doesn't move real cursor)
+        try:
+            def get_sq_selector(sq):
+                f = "abcdefgh".index(sq[0]) + 1
+                r = int(sq[1])
+                return f".square-{f}{r}"
+            
+            from_el = self._board_elem.find_element(By.CSS_SELECTOR, get_sq_selector(from_sq))
+            to_el = self._board_elem.find_element(By.CSS_SELECTOR, get_sq_selector(to_sq))
+            
+            actions = ActionChains(self.chrome)
+            actions.move_to_element(from_el).click().move_to_element(to_el).click().perform()
+            return True
+        except Exception: 
+            pass
+
+        # 2. Fallback: Robust JS-based API / PointerEvents
         script = """
         (function() {
-            function squareToCoords(sq) {
-                var files = {'a':1,'b':2,'c':3,'d':4,'e':5,'f':6,'g':7,'h':8};
-                return {file: files[sq[0]], rank: parseInt(sq[1])};
-            }
-            var from = squareToCoords(arguments[0]);
-            var to   = squareToCoords(arguments[1]);
-            var promo = arguments[2];
+            var files = {'a':1,'b':2,'c':3,'d':4,'e':5,'f':6,'g':7,'h':8};
+            var from = {f: files[arguments[0][0]], r: parseInt(arguments[0][1])};
+            var to   = {f: files[arguments[1][0]], r: parseInt(arguments[1][1])};
+            var promo = arguments[2] || 'q';
 
-            // Try Chess.com's internal game object
             try {
-                var game = window.chessboard || window.ChessBoard;
-                if (game && game.game && game.game.move) {
-                    game.game.move({from: arguments[0], to: arguments[1], promotion: promo || 'q'});
-                    return 'api';
+                var inst = window.chessboard || (window.ChessBoard ? window.ChessBoard.instances[0] : null);
+                var g = inst ? (inst.game || inst) : null;
+                if (g && typeof g.move === 'function') {
+                    g.move({from: arguments[0], to: arguments[1], promotion: promo});
+                    return true;
                 }
             } catch(e) {}
 
-            // Fallback: click the from-square, then the to-square
-            // Chess.com renders squares as <div class="square-XX"> where XX = file*10+rank
-            function clickSquare(file, rank) {
-                var sel = '.square-' + (file * 10 + rank);
-                var el = document.querySelector(sel);
-                if (el) {
-                    el.dispatchEvent(new MouseEvent('mousedown', {bubbles:true}));
-                    el.dispatchEvent(new MouseEvent('mouseup',   {bubbles:true}));
-                    el.dispatchEvent(new MouseEvent('click',     {bubbles:true}));
+            try {
+                var b = document.querySelector('chess-board') || document.querySelector('.board');
+                if (b) {
+                    var r = b.getBoundingClientRect(), flip = b.classList.contains('flipped'), sz = r.width / 8;
+                    function gXY(f, r1) {
+                        return {
+                            x: r.left + (flip ? (8.5 - f) : (f - 0.5)) * sz,
+                            y: r.top + (flip ? (r1 - 0.5) : (8.5 - r1)) * sz
+                        };
+                    }
+                    var fXY = gXY(from.f, from.r), tXY = gXY(to.f, to.r);
+                    var down = new PointerEvent('pointerdown', {bubbles:true, clientX:fXY.x, clientY:fXY.y, pointerType:'mouse', button:0});
+                    var up = new PointerEvent('pointerup', {bubbles:true, clientX:tXY.x, clientY:tXY.y, pointerType:'mouse', button:0});
+                    b.dispatchEvent(down);
+                    setTimeout(function(){ b.dispatchEvent(up); }, 50);
                     return true;
                 }
-                return false;
-            }
-            clickSquare(from.file, from.rank);
-            setTimeout(function(){ clickSquare(to.file, to.rank); }, 100);
-            return 'click';
+            } catch(e) {}
+            return false;
         })();
         """
         try:
-            self.chrome.execute_script(script, from_sq, to_sq, promo)
+            return self.chrome.execute_script(script, from_sq, to_sq, promo)
         except Exception:
-            pass
+            return False
