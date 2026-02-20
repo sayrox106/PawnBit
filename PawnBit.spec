@@ -8,10 +8,12 @@
 # Output: dist/PawnBit  (or dist/PawnBit.exe on Windows)
 
 import sys
+import os
 import platform
 from pathlib import Path
 
 block_cipher = None
+_CUR_DIR = os.path.abspath(os.getcwd())
 
 # ---------------------------------------------------------------------------
 # Collect all source files as datas so they can be restored to _MEIPASS
@@ -64,7 +66,7 @@ hidden_imports = [
 # ---------------------------------------------------------------------------
 a = Analysis(
     ['src/gui.py'],
-    pathex=['src'],
+    pathex=[_CUR_DIR, os.path.join(_CUR_DIR, 'src')],
     binaries=[],
     datas=datas,
     hiddenimports=hidden_imports,
@@ -73,8 +75,7 @@ a = Analysis(
     runtime_hooks=[],
     excludes=[
         'matplotlib', 'numpy', 'pandas', 'scipy', 'IPython', 'jupyter',
-        'pytest', 'unittest', 'test', 'distutils', 'pywin32', 'pydoc',
-        'http.server', 'xmlrpc', 'curses', 'sqlite3'
+        'pytest', 'unittest', 'test'
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
@@ -94,11 +95,10 @@ exe = EXE(
     name='PawnBit',
     debug=False,
     bootloader_ignore_signals=False,
-    strip=False,      # Disabled to avoid 'Invalid access to memory location' errors
-    upx=False,       # Disable UPX to avoid Antivirus false positives
+    strip=False,
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
-    # Set console=False for a professional silent windowed app.
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
