@@ -1,11 +1,9 @@
 import threading
 import time
-import sys
-import os
 import platform
 import random
 import re
-import queue
+
 import subprocess
 import chess
 import pyautogui
@@ -14,7 +12,7 @@ from stockfish import Stockfish
 from grabbers.chesscom_grabber import ChesscomGrabber
 from grabbers.lichess_grabber import LichessGrabber
 from selenium.common.exceptions import WebDriverException
-from utilities import char_to_num
+
 
 
 class StockfishBot(threading.Thread):

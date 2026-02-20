@@ -2,7 +2,6 @@ import tkinter as tk
 import math
 import queue
 import threading
-import time
 
 class TkOverlay:
     def __init__(self, master, overlay_queue):
@@ -91,7 +90,7 @@ class TkOverlay:
             return
         
         pos = self.board_pos
-        bx, by, bw, bh = pos['x'], pos['y'], pos['width'], pos['height']
+        bx, by, bh = pos['x'], pos['y'], pos['height']
         
         # Eval bar dimensions
         bar_w = 25

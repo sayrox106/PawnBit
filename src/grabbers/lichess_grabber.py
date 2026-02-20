@@ -1,6 +1,6 @@
 import re
 import time
-from selenium.common import NoSuchElementException, StaleElementReferenceException, WebDriverException
+from selenium.common import NoSuchElementException, WebDriverException
 from selenium.webdriver.common.by import By
 
 from grabbers.grabber import Grabber

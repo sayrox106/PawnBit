@@ -1,14 +1,9 @@
-from selenium.webdriver.remote.webdriver import WebDriver
-from selenium import webdriver
-
-
 # Converts a chess character into an int
 # Examples: a -> 1, b -> 2, h -> 8, etc.
 def char_to_num(char):
     return ord(char) - ord("a") + 1
 
 
-from selenium import webdriver
 from selenium.webdriver.chrome.options import Options as ChromeOptions
 from selenium.webdriver.remote.webdriver import WebDriver as RemoteWebDriver
 

@@ -15,13 +15,61 @@ No terminal logic. No download logic. No subprocess spawning here.
 
 import os
 import sys
-import threading
 import time
-import platform
+from pathlib import Path
+
+# ── INITIAL SETUP & CRASH LOGGING ──────────────────────────
+# We do this FIRST before any other imports to catch early failures
+if getattr(sys, 'frozen', False):
+    _BASE_DIR = Path(sys.executable).resolve().parent
+    _SRC_DIR = Path(sys._MEIPASS).resolve()
+    _ASSET_DIR = _SRC_DIR / "assets"
+    
+    # Redirect logs immediately
+    try:
+        sys.stdout = open(_BASE_DIR / "output_log.txt", "a", encoding="utf-8", buffering=1)
+        sys.stderr = open(_BASE_DIR / "error_log.txt", "a", encoding="utf-8", buffering=1)
+    except Exception:
+        pass
+else:
+    _SRC_DIR = Path(__file__).resolve().parent
+    _BASE_DIR = _SRC_DIR.parent
+    _ASSET_DIR = _SRC_DIR / "assets"
+
+def log_error(msg):
+    """Fallback logger."""
+    try:
+        log_path = _BASE_DIR / "error_log.txt"
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"[{time.ctime()}] {msg}\n")
+    except Exception:
+        pass
+
+def handle_early_exception(exc_type, exc_value, exc_traceback):
+    import traceback
+    tb_str = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+    log_error(f"FATAL STARTUP ERROR: {exc_type.__name__}: {exc_value}\n{tb_str}")
+    # Try to show a box if possible, but don't count on it
+    try:
+        import tkinter.messagebox as mb
+        mb.showerror("PawnBit - Fatal Startup Error", f"{exc_type.__name__}: {exc_value}\n\nCheck error_log.txt")
+    except Exception:
+        pass
+    os._exit(1)
+
+sys.excepthook = handle_early_exception
+
+# Add source to path for local imports
+if str(_SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(_SRC_DIR))
+
+# ── NOW START REGULAR IMPORTS ────────────────────────────
+import threading
 import queue
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-from pathlib import Path
+import platform
+import json
 
 # ── DPI AWARENESS (Windows) ───────────────────────────────
 if sys.platform == "win32":
@@ -37,23 +85,10 @@ if sys.platform == "win32":
     _original_popen = subprocess.Popen
     class _SilentPopen(_original_popen):
         def __init__(self, *args, **kwargs):
-            # Add CREATE_NO_WINDOW flag
+            # CREATE_NO_WINDOW = 0x08000000
             kwargs['creationflags'] = kwargs.get('creationflags', 0) | 0x08000000
             super().__init__(*args, **kwargs)
     subprocess.Popen = _SilentPopen
-
-# Allow running from project root or src/
-_SRC_DIR = Path(__file__).resolve().parent
-if str(_SRC_DIR) not in sys.path:
-    sys.path.insert(0, str(_SRC_DIR))
-
-# Asset directory: when frozen by PyInstaller assets land in sys._MEIPASS/assets
-if getattr(sys, 'frozen', False):
-    _BASE_DIR = Path(sys.executable).resolve().parent
-    _ASSET_DIR = Path(sys._MEIPASS) / "assets"
-else:
-    _BASE_DIR = Path(__file__).resolve().parent.parent
-    _ASSET_DIR = _SRC_DIR / "assets"
 
 from overlay import TkOverlay
 from stockfish_bot import StockfishBot
@@ -71,23 +106,6 @@ try:
     _KEYBOARD_AVAILABLE = True
 except ImportError:
     _KEYBOARD_AVAILABLE = False
-
-def log_error(msg):
-    """Write error to a log file for debugging frozen exe crashes."""
-    try:
-        log_path = Path(_BASE_DIR) / "error_log.txt"
-        with open(log_path, "a", encoding="utf-8") as f:
-            f.write(f"[{time.ctime()}] {msg}\n")
-    except Exception:
-        pass
-
-# Redirect stdout/stderr to file if frozen
-if getattr(sys, 'frozen', False):
-    try:
-        sys.stdout = open(_BASE_DIR / "output_log.txt", "a", encoding="utf-8")
-        sys.stderr = open(_BASE_DIR / "error_log.txt", "a", encoding="utf-8")
-    except Exception:
-        pass
 
 
 def kill_process_tree(pid):
@@ -396,7 +414,7 @@ class GUI:
         self._engine_status     = {}
 
         # Window
-        master.title("PawnBit v1.0.0-beta.2")
+        master.title("PawnBit v1.0.0-beta.1")
         master.geometry("")
         _icon_path = str(_ASSET_DIR / "pawn_32x32.png")
         if os.path.isfile(_icon_path):
@@ -1188,19 +1206,6 @@ class GUI:
                     log_error("Chrome executable not found in standard locations.")
             
             try:
-                # Force Selenium Manager to resolve the driver path explicitly.
-                # This bypasses issues where Selenium might pick up an old chromedriver from PATH.
-                from selenium.webdriver.common.selenium_manager import SeleniumManager
-                try:
-                    sm = SeleniumManager()
-                    # Resolve driver based on our configured options (which has the Chrome binary path)
-                    driver_path = sm.driver_location(options)
-                    if driver_path:
-                        log_error(f"Selenium Manager resolved driver to: {driver_path}")
-                        service.executable_path = driver_path
-                except Exception as sm_err:
-                    log_error(f"Selenium Manager explicit call failed: {sm_err}")
-
                 self.chrome = webdriver.Chrome(service=service, options=options)
             except WebDriverException as e:
                 err_str = str(e)

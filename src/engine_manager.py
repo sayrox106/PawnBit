@@ -24,12 +24,11 @@ import json
 import os
 import platform
 import re
-import shutil
-import struct
+
+
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 import zipfile
 import tarfile
@@ -254,7 +253,7 @@ def select_best_asset(assets: list, sys_info: Dict, cpu_features: Dict) -> Optio
     Priority: BMI2 > AVX2 > modern > generic (for x86-64 Windows/Linux/macOS).
     """
     os_name = sys_info["os"]
-    arch    = sys_info["arch"]
+
 
     # Map OS to asset name fragment
     if os_name == "windows":
