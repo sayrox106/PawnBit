@@ -1,4 +1,4 @@
-import multiprocess
+import threading
 from stockfish import Stockfish
 import pyautogui
 import time
@@ -13,10 +13,10 @@ from utilities import char_to_num
 import keyboard
 
 
-class StockfishBot(multiprocess.Process):
+class StockfishBot(threading.Thread):
     def __init__(
         self,
-        chrome_url, chrome_session_id, website, pipe, overlay_queue,
+        chrome_url, chrome_session_id, website, bot_to_gui_queue, gui_to_bot_queue, overlay_queue,
         stockfish_path, enable_manual_mode, enable_mouseless_mode,
         enable_non_stop_puzzles, enable_non_stop_matches,
         mouse_latency, bongcloud, slow_mover, skill_level,
@@ -24,12 +24,13 @@ class StockfishBot(multiprocess.Process):
         random_delay_enabled=False,
         random_delay_min=0.0,
     ):
-        multiprocess.Process.__init__(self)
+        threading.Thread.__init__(self)
 
         self.chrome_url = chrome_url
         self.chrome_session_id = chrome_session_id
         self.website = website
-        self.pipe = pipe
+        self.bot_to_gui_queue = bot_to_gui_queue
+        self.gui_to_bot_queue = gui_to_bot_queue
         self.overlay_queue = overlay_queue
         self.stockfish_path = stockfish_path
         self.enable_manual_mode = enable_manual_mode
@@ -55,10 +56,7 @@ class StockfishBot(multiprocess.Process):
     # ------------------------------------------------------------------
 
     def _send(self, msg):
-        try:
-            self.pipe.send(msg)
-        except (BrokenPipeError, OSError):
-            pass
+        self.bot_to_gui_queue.put(msg)
 
     # ------------------------------------------------------------------
     # Coordinate helpers
@@ -122,9 +120,9 @@ class StockfishBot(multiprocess.Process):
 
     def wait_for_gui_to_delete(self):
         try:
-            while self.pipe.recv() != "DELETE":
+            while self.gui_to_bot_queue.get() != "DELETE":
                 pass
-        except (BrokenPipeError, OSError, EOFError):
+        except Exception:
             pass
 
     def go_to_next_puzzle(self):
@@ -237,12 +235,12 @@ class StockfishBot(multiprocess.Process):
 
             while True:
                 # ── Check for STOP from GUI ────────────────────────────
-                if self.pipe.poll():
+                if not self.gui_to_bot_queue.empty():
                     try:
-                        if self.pipe.recv() == "STOP":
+                        if self.gui_to_bot_queue.get_nowait() == "STOP":
                             break
-                    except EOFError:
-                        break
+                    except Exception:
+                        pass
 
                 # ── Bot's turn ─────────────────────────────────────────
                 if (self.is_white and board.turn == chess.WHITE) or (

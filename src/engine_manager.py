@@ -409,43 +409,39 @@ def find_existing_engine() -> Optional[Dict[str, Any]]:
     return None
 
 
-def _find_version_json_for(binary_path: str) -> Optional[Dict]:
+# ---------------------------------------------------------------------------
+# Update check
+# ---------------------------------------------------------------------------
+
+def check_for_updates() -> Optional[Dict[str, str]]:
     """
-    Walk up the directory tree from the binary until we find a version.json.
-    Stockfish archives extract as:  stockfish-18/stockfish/<binary>
-    but version.json is written at: stockfish-18/version.json
-    so we must look in ancestor directories too.
-    Stop at the engines/stockfish root to avoid wandering too far up.
+    Check if a newer Stockfish release is available.
+    Returns {"current": "17", "latest": "18"} if an update exists, else None.
     """
-    d = Path(binary_path).parent
-    for _ in range(4):  # look at most 4 levels up
-        vj = d / "version.json"
-        if vj.exists():
-            try:
-                with open(vj, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except Exception:
-                pass
-        if d == _ENGINES_DIR or d == _BASE_DIR:
-            break
-        d = d.parent
+    cfg = _load_config()
+    current = cfg.get("stockfish_version", "")
+    if not current:
+        return None
+
+    try:
+        release  = fetch_latest_release()
+        latest   = _parse_version_from_release(release)
+        if _version_gt(latest, current):
+            return {"current": current, "latest": latest}
+    except Exception:
+        pass
+
     return None
 
+def _version_gt(a: str, b: str) -> bool:
+    """Return True if version string a > version string b."""
+    def _parts(v):
+        return [int(x) for x in re.findall(r"\d+", v)]
+    try:
+        return _parts(a) > _parts(b)
+    except Exception:
+        return a > b
 
-def _build_status(binary_path: str, vj: Optional[Dict]) -> Dict[str, Any]:
-    result = {
-        "binary_path": binary_path,
-        "version": vj.get("version", "?") if vj else "?",
-        "arch":    vj.get("arch",    "?") if vj else "?",
-        "build":   vj.get("build",   "?") if vj else "?",
-        "valid":   True,
-    }
-    return result
-
-
-# ---------------------------------------------------------------------------
-# GitHub API & download
-# ---------------------------------------------------------------------------
 
 def fetch_latest_release() -> Optional[Dict]:
     """

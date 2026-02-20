@@ -25,31 +25,19 @@ datas = [
 
 hidden_imports = [
     # Core
-    'multiprocess',
-    'multiprocess.pool',
-    'multiprocess.process',
-    'dill',
-    'dill.detect',
-    # Chess
     'chess',
     'chess.engine',
     'stockfish',
     # GUI / automation
     'pyautogui',
-    'pynput',
-    'pynput.keyboard',
-    'pynput.mouse',
     'keyboard',
     'tkinter',
     'tkinter.ttk',
     'tkinter.filedialog',
     'tkinter.messagebox',
-    # Overlay
-    'PyQt6',
-    'PyQt6.QtWidgets',
-    'PyQt6.QtCore',
-    'PyQt6.QtGui',
-    # Selenium + driver manager
+    'queue',
+    'threading',
+    # Selenium
     'selenium',
     'selenium.webdriver',
     'selenium.webdriver.chrome',
@@ -59,17 +47,11 @@ hidden_imports = [
     'selenium.webdriver.common.by',
     'selenium.common',
     'selenium.common.exceptions',
-    'webdriver_manager',
-    'webdriver_manager.chrome',
     # Utility
     'packaging',
-    'packaging.version',
-    'packaging.specifiers',
-    'packaging.requirements',
     'pkg_resources',
     'PIL',
     'PIL.Image',
-    # Stdlib that sometimes needs explicit listing
     'zipfile',
     'tarfile',
     'urllib.request',
@@ -77,7 +59,6 @@ hidden_imports = [
     'tempfile',
     'subprocess',
     'platform',
-    'struct',
 ]
 
 # ---------------------------------------------------------------------------
@@ -91,13 +72,9 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
-        'matplotlib',
-        'numpy',
-        'pandas',
-        'scipy',
-        'IPython',
-        'jupyter',
-        'pytest',
+        'matplotlib', 'numpy', 'pandas', 'scipy', 'IPython', 'jupyter',
+        'pytest', 'unittest', 'test', 'distutils', 'pywin32', 'pydoc',
+        'http.server', 'xmlrpc', 'curses', 'sqlite3'
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
@@ -117,18 +94,16 @@ exe = EXE(
     name='PawnBit',
     debug=False,
     bootloader_ignore_signals=False,
-    strip=False,
-    upx=True,
+    strip=True,       # Strip symbols to reduce size
+    upx=False,       # Disable UPX to avoid Antivirus false positives
     upx_exclude=[],
     runtime_tmpdir=None,
-    # Keep console=True for beta builds so errors are visible.
-    # Set to False for a silent final release.
+    # Set console=False for a professional silent windowed app.
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    # PNG icon works on Windows (PyInstaller 6+). For macOS use .icns.
     icon='src/assets/pawn_32x32.png',
 )

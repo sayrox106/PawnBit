@@ -18,7 +18,7 @@ import sys
 import threading
 import time
 import platform
-import multiprocess
+import queue
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from pathlib import Path
@@ -40,9 +40,6 @@ if sys.platform == "win32":
         return _original_popen(*args, **kwargs)
     subprocess.Popen = _silent_popen
 
-if getattr(sys, 'frozen', False):
-    multiprocess.set_executable(sys.executable)
-
 # Allow running from project root or src/
 _SRC_DIR = Path(__file__).resolve().parent
 if str(_SRC_DIR) not in sys.path:
@@ -56,14 +53,13 @@ else:
     _BASE_DIR = Path(__file__).resolve().parent.parent
     _ASSET_DIR = _SRC_DIR / "assets"
 
-from overlay import run as run_overlay
+from overlay import TkOverlay
 from stockfish_bot import StockfishBot
 import engine_manager
 
 try:
     from selenium import webdriver
     from selenium.webdriver.chrome.service import Service as ChromeService
-    from webdriver_manager.chrome import ChromeDriverManager
     from selenium.common import WebDriverException
 except ImportError:
     pass
@@ -386,10 +382,11 @@ class GUI:
         self.chrome             = None
         self.chrome_url         = None
         self.chrome_session_id  = None
-        self.stockfish_bot_pipe = None
-        self.stockfish_bot_process = None
-        self.overlay_screen_process = None
-        self.overlay_queue      = None
+        self.stockfish_bot_thread = None
+        self.bot_to_gui_queue   = queue.Queue()
+        self.gui_to_bot_queue   = queue.Queue()
+        self.overlay_queue      = queue.Queue()
+        self.overlay            = None
         self.restart_after_stopping = False
 
         # Engine path (resolved after detection)
@@ -397,7 +394,7 @@ class GUI:
         self._engine_status     = {}
 
         # Window
-        master.title("PawnBit")
+        master.title("PawnBit v1.0.0-beta.2")
         master.geometry("")
         _icon_path = str(_ASSET_DIR / "pawn_32x32.png")
         if os.path.isfile(_icon_path):
@@ -961,8 +958,8 @@ class GUI:
         while not self.exit:
             if (
                 self.running
-                and self.stockfish_bot_process is not None
-                and not self.stockfish_bot_process.is_alive()
+                and self.stockfish_bot_thread is not None
+                and not self.stockfish_bot_thread.is_alive()
             ):
                 self.on_stop_button_listener()
                 if self.restart_after_stopping:
@@ -993,11 +990,8 @@ class GUI:
     def process_communicator_thread(self):
         while not self.exit:
             try:
-                if (
-                    self.stockfish_bot_pipe is not None
-                    and self.stockfish_bot_pipe.poll()
-                ):
-                    data = self.stockfish_bot_pipe.recv()
+                while not self.bot_to_gui_queue.empty():
+                    data = self.bot_to_gui_queue.get_nowait()
                     if data == "START":
                         self.clear_tree()
                         self.match_moves = []
@@ -1010,7 +1004,7 @@ class GUI:
                         self.start_button.update()
                     elif data[:7] == "RESTART":
                         self.restart_after_stopping = True
-                        self.stockfish_bot_pipe.send("DELETE")
+                        self.gui_to_bot_queue.put("DELETE")
                     elif data[:6] == "S_MOVE":
                         move = data[6:]
                         self.match_moves.append(move)
@@ -1023,9 +1017,11 @@ class GUI:
                         self.tree.yview_moveto(1)
                     elif data[:5] == "EVAL|":
                         parts = data.split("|")
-                        if len(parts) >= 5:
-                            eval_str, wdl_str, material_str, bot_acc, opp_acc = parts[1:]
+                        if len(parts) >= 6:
+                            eval_str, wdl_str, material_str, bot_acc, opp_acc = parts[1:6]
                             self.update_evaluation_display(eval_str, wdl_str, material_str, bot_acc, opp_acc)
+                    elif data == "STOPPED":
+                        self.on_stop_button_listener()
                     elif data[:7] == "ERR_EXE":
                         messagebox.showerror("Error", "Stockfish path provided is not valid!")
                     elif data[:8] == "ERR_PERM":
@@ -1038,8 +1034,8 @@ class GUI:
                         messagebox.showerror("Error", "Cant find moves list!")
                     elif data[:12] == "ERR_GAMEOVER":
                         messagebox.showerror("Error", "Game has already finished!")
-            except (BrokenPipeError, OSError):
-                self.stockfish_bot_pipe = None
+            except Exception:
+                pass
 
             time.sleep(0.1)
 
@@ -1063,11 +1059,17 @@ class GUI:
     # ------------------------------------------------------------------
 
     def on_open_browser_button_listener(self):
+        """Called when the user clicks 'Open Browser'."""
         self.opening_browser = True
         self.open_browser_button["text"] = "Opening Browser..."
         self.open_browser_button["state"] = "disabled"
         self.open_browser_button.update()
 
+        # Run the actual opening logic in a thread to keep the GUI responsive.
+        # This prevents the 'Not Responding' status during Chrome launch.
+        threading.Thread(target=self._open_browser_worker, daemon=True).start()
+
+    def _open_browser_worker(self):
         try:
             options = webdriver.ChromeOptions()
             options.add_experimental_option(
@@ -1075,43 +1077,49 @@ class GUI:
             )
             options.add_argument("--disable-blink-features=AutomationControlled")
             options.add_experimental_option("useAutomationExtension", False)
+            
+            # Use more stable options
+            options.add_argument("--no-sandbox")
+            options.add_argument("--disable-dev-shm-usage")
+            options.add_argument("--disable-gpu")
 
-            chrome_install = ChromeDriverManager().install()
-            folder = os.path.dirname(chrome_install)
-            chromedriver_path = os.path.join(folder, "chromedriver.exe")
-            from selenium.webdriver.chrome.service import Service as ChromeService
-            service = ChromeService(chromedriver_path)
+            # Fallback: Let Selenium 4 handle it (Selenium Manager)
+            service = ChromeService()
+
             if sys.platform == "win32":
                 service.creationflags = 0x08000000
+            
             self.chrome = webdriver.Chrome(service=service, options=options)
-        except WebDriverException:
-            self._reset_browser_button()
-            messagebox.showerror(
-                "Error",
-                "Cant find Chrome. You need to have Chrome installed for this to work.",
-            )
-            return
+            
+            # Navigation
+            if self.website.get() == "chesscom":
+                self.chrome.get("https://www.chess.com")
+            else:
+                self.chrome.get("https://www.lichess.org")
+
+            self.chrome_url        = self.chrome.service.service_url
+            self.chrome_session_id = self.chrome.session_id
+
+            # Success: update UI in main thread
+            self.master.after(0, self._on_browser_success)
+
+        except WebDriverException as e:
+            log_error(f"WebDriverException: {e}")
+            self.master.after(0, lambda: self._on_browser_failed("Could not find or launch Chrome. Please ensure Google Chrome is installed."))
         except Exception as e:
-            self._reset_browser_button()
-            messagebox.showerror("Error", f"An error occurred while opening the browser: {e}")
-            return
+            log_error(f"Browser open exception: {e}")
+            self.master.after(0, lambda: self._on_browser_failed(f"An error occurred: {e}"))
 
-        if self.website.get() == "chesscom":
-            self.chrome.get("https://www.chess.com")
-        else:
-            self.chrome.get("https://www.lichess.org")
-
-        self.chrome_url        = self.chrome.service.service_url
-        self.chrome_session_id = self.chrome.session_id
-
+    def _on_browser_success(self):
         self.opening_browser = False
         self.opened_browser  = True
         self.open_browser_button["text"] = "Browser is open"
         self.open_browser_button["state"] = "disabled"
-        self.open_browser_button.update()
-
         self.start_button["state"] = "normal"
-        self.start_button.update()
+
+    def _on_browser_failed(self, msg):
+        self._reset_browser_button()
+        messagebox.showerror("Error", msg)
 
     def _reset_browser_button(self):
         self.opening_browser = False
@@ -1165,17 +1173,18 @@ class GUI:
                 )
                 return
 
-        parent_conn, child_conn = multiprocess.Pipe()
-        self.stockfish_bot_pipe = parent_conn
-        st_ov_queue = multiprocess.Queue()
-        self.overlay_queue = st_ov_queue # Store for cleanup
+        # Reset queues
+        self.bot_to_gui_queue = queue.Queue()
+        self.gui_to_bot_queue = queue.Queue()
+        self.overlay_queue    = queue.Queue()
 
-        self.stockfish_bot_process = StockfishBot(
+        self.stockfish_bot_thread = StockfishBot(
             self.chrome_url,
             self.chrome_session_id,
             self.website.get(),
-            child_conn,
-            st_ov_queue,
+            self.bot_to_gui_queue,
+            self.gui_to_bot_queue,
+            self.overlay_queue,
             self.stockfish_path,
             self.enable_manual_mode.get() == 1,
             self.enable_mouseless_mode.get() == 1,
@@ -1191,12 +1200,10 @@ class GUI:
             random_delay_enabled=self.random_delay_enabled.get(),
             random_delay_min=self.random_delay_min.get(),
         )
-        self.stockfish_bot_process.start()
+        self.stockfish_bot_thread.start()
 
-        self.overlay_screen_process = multiprocess.Process(
-            target=run_overlay, args=(st_ov_queue,)
-        )
-        self.overlay_screen_process.start()
+        # Start TkOverlay
+        self.overlay = TkOverlay(self.master, self.overlay_queue)
 
         self.running = True
         self.start_button["text"]  = "Starting..."
@@ -1204,44 +1211,28 @@ class GUI:
         self.start_button.update()
 
     def on_stop_button_listener(self):
-        if self.stockfish_bot_process is not None:
+        if self.stockfish_bot_thread is not None:
             # 1. Try graceful stop
             try:
-                if self.stockfish_bot_pipe:
-                    self.stockfish_bot_pipe.send("STOP")
+                self.gui_to_bot_queue.put("STOP")
             except Exception:
                 pass
             
             # 2. Tell overlay to stop
             try:
-                # We need a reference to the queue we passed to overlay
-                # I'll store it as self.overlay_queue
-                if hasattr(self, 'overlay_queue') and self.overlay_queue:
+                if self.overlay_queue:
                     self.overlay_queue.put("STOP")
+                if self.overlay:
+                    self.overlay.destroy()
+                    self.overlay = None
             except Exception:
                 pass
 
-            if self.overlay_screen_process is not None:
-                try:
-                    self.overlay_screen_process.terminate()
-                    self.overlay_screen_process.join(timeout=0.5)
-                    if self.overlay_screen_process.is_alive():
-                        kill_process_tree(self.overlay_screen_process.pid)
-                except Exception:
-                    pass
-                self.overlay_screen_process = None
-
-            if self.stockfish_bot_process.is_alive():
-                self.stockfish_bot_process.join(timeout=1.5)
-                if self.stockfish_bot_process.is_alive():
-                    # If it's still alive, it means the graceful stop failed
-                    # or it's hung. Kill it and its child (Stockfish engine).
-                    kill_process_tree(self.stockfish_bot_process.pid)
-            self.stockfish_bot_process = None
-
-        if self.stockfish_bot_pipe is not None:
-            self.stockfish_bot_pipe.close()
-            self.stockfish_bot_pipe = None
+            if self.stockfish_bot_thread.is_alive():
+                # For threads, we just wait. The bot loop checks the queue.
+                self.stockfish_bot_thread.join(timeout=1.0)
+            
+            self.stockfish_bot_thread = None
 
         self.running = False
         self.status_text["text"] = "Inactive"
@@ -1371,18 +1362,32 @@ class GUI:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    multiprocess.freeze_support()
     
     # Global exception handler for the GUI
     def handle_exception(exc_type, exc_value, exc_traceback):
         if issubclass(exc_type, KeyboardInterrupt):
             sys.__excepthook__(exc_type, exc_value, exc_traceback)
             return
-        err_msg = f"Uncaught exception: {exc_type.__name__}: {exc_value}"
+        
+        import traceback
+        tb_str = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+        err_msg = f"Fatal error: {exc_type.__name__}: {exc_value}\n\n{tb_str}"
+        
         log_error(err_msg)
-        # Also print to stderr if not frozen
-        if not getattr(sys, 'frozen', False):
-            sys.__excepthook__(exc_type, exc_value, exc_traceback)
+        
+        # In a frozen exe, show the error to the user before quitting.
+        if getattr(sys, 'frozen', False):
+            # Try to show a messagebox, but it might fail if the GUI is already broken.
+            try:
+                messagebox.showerror("PawnBit - Fatal Error", 
+                    "An unexpected error occurred and the application must close.\n\n"
+                    "Error details have been saved to 'error_log.txt'.\n\n"
+                    f"{exc_type.__name__}: {exc_value}")
+            except Exception:
+                pass
+        
+        # Hard exit
+        os._exit(1)
 
     sys.excepthook = handle_exception
 

@@ -16,7 +16,7 @@ _Note: The mouse is moved by Python in standard mode._
 ## 🚀 Features
 
 - **Multi-Platform Support**: Windows, Linux, and macOS.
-- **Auto-Engine Management**: Stockfish 18 is bundled with the executable. No manual download required for fresh installs.
+- **Auto-Engine Management**: Stockfish 18 is supported (detection and auto-installation).
 - **Human-like Behavior**:
   - **Random Delays**: Simulates human thinking time with configurable minimum delays.
   - **Mouse Latency**: Adjustable movement speed.
@@ -31,14 +31,15 @@ _Note: The mouse is moved by Python in standard mode._
   - Accuracy estimation for you and your opponent.
 - **Customizable Engine**: Control Depth, Skill Level, Memory (Hash), and CPU Threads.
 - **Settings Persistence**: Your configuration is automatically saved and loaded.
+- **Improved Stability**: Threaded browser launching and robust error handling for frozen executables.
 
 ## 📥 Installation
 
 ### 1. Download (Recommended)
 
-Download the latest pre-built executable from the [Releases](../../releases) page.
+Download the latest pre-built executable (**v1.0.0-beta.2**) from the [Releases](../../releases) page.
 
-- **Windows**: Run `PawnBit-windows.exe`. Stockfish is included!
+- **Windows**: Run `PawnBit-windows.exe`.
 - **macOS/Linux**: Download the binary, run `chmod +x PawnBit-platform` and execute.
 
 ### 2. From Source
