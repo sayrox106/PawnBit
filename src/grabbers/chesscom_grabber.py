@@ -12,24 +12,46 @@ class ChesscomGrabber(Grabber):
     # Board element
     # ------------------------------------------------------------------
 
-    def update_board_elem(self):
-        try:
-            self._board_elem = self.chrome.find_element(
-                By.XPATH, "//*[@id='board-play-computer']"
-            )
-        except NoSuchElementException:
+    def update_board_elem(self, stop_queue=None):
+        """Keep looking for the board element until found, browser closed, or STOP signal."""
+        import time
+        from selenium.common.exceptions import WebDriverException
+        
+        while True:
+            # Check for STOP signal from GUI
+            if stop_queue and not stop_queue.empty():
+                try:
+                    if stop_queue.get_nowait() == "STOP":
+                        return
+                except Exception:
+                    pass
+
             try:
                 self._board_elem = self.chrome.find_element(
-                    By.XPATH, "//*[@id='board-single']"
+                    By.XPATH, "//*[@id='board-play-computer']"
                 )
+                if self._board_elem: return
             except NoSuchElementException:
                 try:
-                    # Puzzle board
                     self._board_elem = self.chrome.find_element(
-                        By.XPATH, "//*[@id='board-puzzle']"
+                        By.XPATH, "//*[@id='board-single']"
                     )
+                    if self._board_elem: return
                 except NoSuchElementException:
-                    self._board_elem = None
+                    try:
+                        # Puzzle board
+                        self._board_elem = self.chrome.find_element(
+                            By.XPATH, "//*[@id='board-puzzle']"
+                        )
+                        if self._board_elem: return
+                    except NoSuchElementException:
+                        self._board_elem = None
+            except (WebDriverException, Exception):
+                self._board_elem = None
+                return
+
+            # Optimized sleep
+            time.sleep(1)
 
     # ------------------------------------------------------------------
     # Color detection

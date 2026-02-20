@@ -11,31 +11,52 @@ class LichessGrabber(Grabber):
         super().__init__(chrome_url, chrome_session_id)
         self.tag_name = None
 
-    def update_board_elem(self):
-        # Keep looking for board
+    def update_board_elem(self, stop_queue=None):
+        """Keep looking for the board element until found, browser closed, or STOP signal."""
+        import time
+        from selenium.common.exceptions import WebDriverException
+        
         while True:
+            # Check for STOP signal from GUI
+            if stop_queue and not stop_queue.empty():
+                try:
+                    if stop_queue.get_nowait() == "STOP":
+                        return
+                except Exception:
+                    pass
+
             try:
                 # Try finding the normal board
-                self._board_elem = self.chrome.find_element(By.XPATH,
-                                                            '//*[@id="main-wrap"]/main/div[1]/div[1]/div/cg-container')
-                return
+                self._board_elem = self.chrome.find_element(By.XPATH, '//*[@id="main-wrap"]/main/div[1]/div[1]/div/cg-container')
+                if self._board_elem:
+                    return
             except NoSuchElementException:
                 try:
                     # Try finding the board in the puzzles page
                     self._board_elem = self.chrome.find_element(By.XPATH, '/html/body/div[2]/main/div[1]/div/cg-container')
-                    return
+                    if self._board_elem:
+                        return
                 except NoSuchElementException:
                     self._board_elem = None
+            except (WebDriverException, Exception):
+                # Browser likely closed or disconnected
+                self._board_elem = None
+                return
+
+            # Optimized: wait a bit before next check to save CPU
+            time.sleep(1)
 
     def is_white(self):
-        # sourcery skip: assign-if-exp, boolean-if-exp-identity, remove-unnecessary-cast
-        # Get "ranks" child
-        children = self._board_elem.find_elements(By.XPATH, "./*")
-        child = [x for x in children if "ranks" in x.get_attribute("class")][0]
-        if child.get_attribute("class") == "ranks":
-            return True
-        else:
-            return False
+        if not self._board_elem:
+            return None
+        try:
+            children = self._board_elem.find_elements(By.XPATH, "./*")
+            ranks = [x for x in children if x.get_attribute("class") and "ranks" in x.get_attribute("class")]
+            if not ranks:
+                return None
+            return "ranks" in ranks[0].get_attribute("class")
+        except (NoSuchElementException, IndexError, StaleElementReferenceException):
+            return None
 
     def is_game_over(self):
         # sourcery skip: assign-if-exp, boolean-if-exp-identity, reintroduce-else, remove-unnecessary-cast

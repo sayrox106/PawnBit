@@ -198,7 +198,7 @@ class StockfishBot(threading.Thread):
             return
 
         try:
-            self.grabber.update_board_elem()
+            self.grabber.update_board_elem(stop_queue=self.gui_to_bot_queue)
             if self.grabber.get_board() is None:
                 self._send("ERR_BOARD")
                 return

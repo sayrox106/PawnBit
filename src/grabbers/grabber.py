@@ -26,7 +26,7 @@ class Grabber(ABC):
 
     # Sets the _board_elem variable
     @abstractmethod
-    def update_board_elem(self):
+    def update_board_elem(self, stop_queue=None):
         pass
 
     # Returns True if white, False if black,
