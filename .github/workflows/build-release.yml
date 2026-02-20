@@ -261,7 +261,7 @@ jobs:
 
             ---
 
-            ### ✨ What's new in v1.0.0-beta.3
+            ### ✨ What's new in v1.0.0-beta.1
             - **Ghost Human Mode**: Advanced mouseless injection that simulates realistic mouse movements and jitter (Enable "Human-like Random Delay").
             - **Settings Management**: Added Auto-Save and Config Import/Export buttons (Check the bottom right!).
             - **Performance Calibration**: Reduced CPU overhead for board detection and synchronized engine evaluation.
