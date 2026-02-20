@@ -37,7 +37,7 @@ _Note: The mouse is moved by Python in standard mode._
 
 ### 1. Download (Recommended)
 
-Download the latest pre-built executable (**v1.0.0-beta.2**) from the [Releases](../../releases) page.
+Download the latest pre-built executable (**v1.0.0-beta.1**) from the [Releases](../../releases) page.
 
 - **Windows**: Run `PawnBit-windows.exe`.
 - **macOS/Linux**: Download the binary, run `chmod +x PawnBit-platform` and execute.

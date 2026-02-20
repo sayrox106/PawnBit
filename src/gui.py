@@ -35,10 +35,12 @@ if sys.platform == "win32":
 if sys.platform == "win32":
     import subprocess
     _original_popen = subprocess.Popen
-    def _silent_popen(*args, **kwargs):
-        kwargs['creationflags'] = kwargs.get('creationflags', 0) | 0x08000000
-        return _original_popen(*args, **kwargs)
-    subprocess.Popen = _silent_popen
+    class _SilentPopen(_original_popen):
+        def __init__(self, *args, **kwargs):
+            # Add CREATE_NO_WINDOW flag
+            kwargs['creationflags'] = kwargs.get('creationflags', 0) | 0x08000000
+            super().__init__(*args, **kwargs)
+    subprocess.Popen = _SilentPopen
 
 # Allow running from project root or src/
 _SRC_DIR = Path(__file__).resolve().parent
@@ -1089,31 +1091,50 @@ class GUI:
             if sys.platform == "win32":
                 service.creationflags = 0x08000000
                 
-                # Help Selenium Manager find Chrome by adding common paths to PATH
+                # IMPORTANT: Clear selenium-related env vars that might point to old drivers
+                for key in list(os.environ.keys()):
+                    if "webdriver" in key.lower() or "chromedriver" in key.lower():
+                        del os.environ[key]
+
+                # Create a local, clean cache directory for drivers to avoid conflicts with global ones
+                local_cache = os.path.join(os.path.expandvars("%LOCALAPPDATA%"), "PawnBitDrivers")
+                os.makedirs(local_cache, exist_ok=True)
+                os.environ["SE_CACHE_PATH"] = local_cache
+                
+                # Explicitly point to the Chrome binary
                 chrome_dirs = [
                     r"C:\Program Files\Google\Chrome\Application",
                     r"C:\Program Files (x86)\Google\Chrome\Application",
                     os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application"),
                 ]
-                path_parts = os.environ.get("PATH", "").split(os.pathsep)
+                
+                chrome_exe = None
                 for d in chrome_dirs:
-                    if os.path.isdir(d) and d not in path_parts:
-                        path_parts.append(d)
-                os.environ["PATH"] = os.pathsep.join(path_parts)
+                    candidate = os.path.join(d, "chrome.exe")
+                    if os.path.exists(candidate):
+                        chrome_exe = candidate
+                        break
+                
+                if chrome_exe:
+                    options.binary_location = chrome_exe
+                    # Do NOT add to PATH; it can cause Selenium to pick up old drivers in the same folder.
+                else:
+                    log_error("Chrome executable not found in standard locations.")
             
             try:
+                # We do NOT pass a path to service. Selenium 4.6+ will use Selenium Manager 
+                # (bundled within selenium package) to find/download the matching driver.
                 self.chrome = webdriver.Chrome(service=service, options=options)
             except WebDriverException as e:
-                # If it fails, try one more time without the hidden console flag just in case
-                if "Selenium Manager" in str(e) or "chromedriver" in str(e):
-                    log_error(f"First Chrome launch failed: {e}")
-                    try:
-                        service = ChromeService() # fresh service
-                        self.chrome = webdriver.Chrome(service=service, options=options)
-                    except Exception as e2:
-                        raise e2
-                else:
-                    raise e
+                err_str = str(e)
+                log_error(f"First Chrome launch failed: {err_str}")
+                # Fallback: if there's a driver in the current directory or nearby, 
+                # Selenium might be confused. We try one more time.
+                try:
+                    service = ChromeService()
+                    self.chrome = webdriver.Chrome(service=service, options=options)
+                except Exception as e2:
+                    raise e2
             
             # Navigation
             if self.website.get() == "chesscom":

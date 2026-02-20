@@ -144,11 +144,12 @@ class StockfishBot(threading.Thread):
         # ── HIDE CONSOLE WINDOW ───────────────────────────────────
         if platform.system() == "Windows":
             import subprocess
-            original_popen = subprocess.Popen
-            def silent_popen(*args, **kwargs):
-                kwargs['creationflags'] = kwargs.get('creationflags', 0) | 0x08000000
-                return original_popen(*args, **kwargs)
-            subprocess.Popen = silent_popen
+            _original_popen = subprocess.Popen
+            class _LocalSilentPopen(_original_popen):
+                def __init__(self, *args, **kwargs):
+                    kwargs['creationflags'] = kwargs.get('creationflags', 0) | 0x08000000
+                    super().__init__(*args, **kwargs)
+            subprocess.Popen = _LocalSilentPopen
 
         if self.website == "chesscom":
             self.grabber = ChesscomGrabber(self.chrome_url, self.chrome_session_id)
@@ -420,25 +421,29 @@ class StockfishBot(threading.Thread):
                     return
 
         except Exception as e:
-            print(e)
-            # exc_type, exc_obj, exc_tb = sys.exc_info()
-            # fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
-            # print(exc_type, fname, exc_tb.tb_lineno)
+            # log_error is only in gui.py, so we use print and send back to GUI
+            err_msg = f"Bot Crash: {e}"
+            print(err_msg)
+            # Potentially send a specific error to GUI if needed
         finally:
             # ── CLEANUP ───────────────────────────────────────────────
             try:
-                # Explicitly close stockfish to ensure the subprocess is killed
+                # 1. Ask Stockfish nicely
                 if 'stockfish' in locals() and stockfish:
                     try:
-                        # Internal access to the subprocess object in stockfish-python
-                        if hasattr(stockfish, "_stockfish_subprocess"):
-                            stockfish._stockfish_subprocess.kill()
-                            stockfish._stockfish_subprocess.wait()
+                        # Try to get the internal process object to kill it
+                        # stockfish-python internally uses ._stockfish_subprocess
+                        sp = getattr(stockfish, "_stockfish_subprocess", None)
+                        if sp:
+                            sp.kill()
+                            sp.wait()
                     except Exception:
                         pass
                     del stockfish
             except Exception:
                 pass
+            
+            # 2. Inform GUI
             self._send("STOPPED")
 
     # ------------------------------------------------------------------
