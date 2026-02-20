@@ -61,7 +61,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path "src/assets/engines/default"
           # We bundle a generic version to ensure startup on all systems
-          $url = "https://github.com/official-stockfish/Stockfish/releases/download/sf_18/stockfish-windows-x86-64-modern.zip"
+          $url = "https://github.com/official-stockfish/Stockfish/releases/download/sf_18/stockfish-windows-x86-64.zip"
           if ($IsLinux -or $IsMacOS) {
              # Add linux/macos logic if needed, but for now we focus on fixing Windows
           }
